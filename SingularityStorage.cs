@@ -10,7 +10,7 @@ using System.Collections;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "4.5.3")]
+    [Info("SingularityStorage", "YourServer", "4.5.6")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
@@ -176,6 +176,87 @@ namespace Oxide.Plugins
                     ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(sign, config.TerminalFaceTextureUrl));
                 }
             }
+        }
+        
+        // Prevent players from rotating singularity terminals and displays
+        private object OnHammerHit(BasePlayer player, HitInfo info)
+        {
+            if (player == null || info?.HitEntity == null) return null;
+            
+            // Check if it's a vending machine
+            var vendingMachine = info.HitEntity as VendingMachine;
+            if (vendingMachine != null && activeTerminals.ContainsKey(vendingMachine.net.ID.Value))
+            {
+                SendReply(player, "<color=#ff0000>You cannot modify Singularity Storage terminals!</color>");
+                return true; // Return true to cancel the hammer action
+            }
+            
+            // Check if it's a sign/picture frame
+            var sign = info.HitEntity as Signage;
+            if (sign != null)
+            {
+                foreach (var terminal in activeTerminals.Values)
+                {
+                    if (terminal?.DisplayEntity == sign)
+                    {
+                        SendReply(player, "<color=#ff0000>You cannot modify Singularity Storage displays!</color>");
+                        return true; // Block the hammer hit
+                    }
+                }
+            }
+            
+            return null;
+        }
+        
+        // Specific hook for vending machine rotation
+        private object OnRotateVendingMachine(VendingMachine vendingMachine, BasePlayer player)
+        {
+            if (vendingMachine == null || player == null) return null;
+            
+            // Check if this is one of our terminals
+            if (activeTerminals.ContainsKey(vendingMachine.net.ID.Value))
+            {
+                SendReply(player, "<color=#ff0000>Singularity terminals cannot be rotated!</color>");
+                return true; // Return non-null to block rotation
+            }
+            
+            return null;
+        }
+        
+        // Additional protection against rotation
+        private object CanRotateEntity(BasePlayer player, BaseEntity entity)
+        {
+            if (player == null || entity == null) return null;
+            
+            var vendingMachine = entity as VendingMachine;
+            if (vendingMachine == null) return null;
+            
+            // Check if this is one of our terminals
+            if (activeTerminals.ContainsKey(vendingMachine.net.ID.Value))
+            {
+                SendReply(player, "<color=#ff0000>Singularity terminals cannot be rotated!</color>");
+                return false; // Block rotation
+            }
+            
+            return null;
+        }
+        
+        // Prevent pickup of singularity terminals
+        private object CanPickupEntity(BasePlayer player, BaseEntity entity)
+        {
+            if (player == null || entity == null) return null;
+            
+            var vendingMachine = entity as VendingMachine;
+            if (vendingMachine == null) return null;
+            
+            // Check if this is one of our terminals
+            if (activeTerminals.ContainsKey(vendingMachine.net.ID.Value))
+            {
+                SendReply(player, "<color=#ff0000>Singularity terminals cannot be picked up!</color>");
+                return false; // Block pickup
+            }
+            
+            return null;
         }
         
         private void Unload()
@@ -376,6 +457,9 @@ namespace Oxide.Plugins
             if (vendingMachine != null)
             {
                 vendingMachine.shopName = config.TerminalDisplayName;
+                
+                // Make the terminal non-modifiable
+                entity.SetFlag(BaseEntity.Flags.Reserved8, true); // This flag often prevents rotation
                 vendingMachine.skinID = config.TerminalSkinId;
                 Puts($"[DEBUG] Post-spawn - Setting skinID to: {config.TerminalSkinId}");
                 vendingMachine.SetFlag(BaseEntity.Flags.Reserved1, true);
