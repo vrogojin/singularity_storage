@@ -10,7 +10,7 @@ using System.Collections;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "4.3.0")]
+    [Info("SingularityStorage", "YourServer", "4.5.0")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
@@ -989,19 +989,8 @@ namespace Oxide.Plugins
         
         private int GetCurrentScrapTotal(ulong playerId, ItemContainer container)
         {
-            var savedScrap = 0;
-            var playerData = GetPlayerStorage(playerId);
-            
-            // Count saved scrap
-            foreach (var item in playerData.Items)
-            {
-                if (item.ItemId == -932201673) // Scrap item ID
-                {
-                    savedScrap += item.Amount;
-                }
-            }
-            
-            // Count scrap in container
+            // When a container is open, the saved items have already been loaded into it
+            // So we should ONLY count what's in the container, not the saved storage
             var containerScrap = 0;
             if (container != null)
             {
@@ -1015,7 +1004,9 @@ namespace Oxide.Plugins
                 }
             }
             
-            return savedScrap + containerScrap;
+            Puts($"[DEBUG] GetCurrentScrapTotal - Container scrap: {containerScrap}");
+            
+            return containerScrap;
         }
         
         private int GetPlayerScrapInStorage(ulong playerId)
@@ -1157,8 +1148,17 @@ namespace Oxide.Plugins
                     
                     if (totalAfterAdd > scrapLimit)
                     {
-                        SendReply(player, $"<color=#ff0000>Cannot add {item.amount} scrap. Tier {tier} limit is {scrapLimit:N0}, you have {currentScrap:N0}.</color>");
-                        return ItemContainer.CanAcceptResult.CannotAccept;
+                        // Calculate how much we can accept
+                        var canAccept = scrapLimit - currentScrap;
+                        
+                        if (canAccept <= 0)
+                        {
+                            SendReply(player, $"<color=#ff0000>Scrap storage full! Tier {tier} limit is {scrapLimit:N0}.</color>");
+                            return ItemContainer.CanAcceptResult.CannotAccept;
+                        }
+                        
+                        // We'll handle partial transfers in OnItemAddedToContainer
+                        return null; // Allow it to be added, then we'll split it
                     }
                 }
             }
@@ -1172,6 +1172,90 @@ namespace Oxide.Plugins
             return null;
         }
         
+        // Handle partial scrap transfers
+        private void OnItemAddedToContainer(ItemContainer container, Item item)
+        {
+            if (container == null || item == null) return;
+            
+            // Check if this container belongs to one of our quantum storage entities
+            var storage = container.entityOwner as StorageContainer;
+            if (storage == null) return;
+            
+            // Only handle scrap
+            if (item.info.shortname != "scrap") return;
+            
+            // Find which player has this storage open
+            BasePlayer player = null;
+            foreach (var kvp in playerActiveStorage)
+            {
+                if (kvp.Value == storage)
+                {
+                    player = BasePlayer.FindByID(kvp.Key);
+                    break;
+                }
+            }
+            
+            if (player == null) return;
+            
+            var tier = GetPlayerStorageTier(player);
+            var scrapLimit = GetTierScrapLimit(tier);
+            
+            if (scrapLimit == -1) return; // No limit
+            
+            // Count total scrap in container only (saved items are already loaded)
+            var totalScrap = 0;
+            for (int i = 0; i < container.capacity; i++)
+            {
+                var containerItem = container.GetSlot(i);
+                if (containerItem != null && containerItem.info.shortname == "scrap")
+                {
+                    totalScrap += containerItem.amount;
+                }
+            }
+            
+            Puts($"[DEBUG] OnItemAddedToContainer - Total scrap in container: {totalScrap}, Limit: {scrapLimit}");
+            
+            if (totalScrap > scrapLimit)
+            {
+                // Calculate excess
+                var excess = totalScrap - scrapLimit;
+                var keepAmount = item.amount - excess;
+                
+                if (keepAmount > 0)
+                {
+                    // Partial transfer
+                    item.amount = keepAmount;
+                    item.MarkDirty();
+                    
+                    // Give back excess
+                    var excessItem = ItemManager.Create(item.info, excess, item.skin);
+                    if (excessItem != null)
+                    {
+                        timer.Once(0.1f, () =>
+                        {
+                            if (player != null && player.IsConnected)
+                            {
+                                player.GiveItem(excessItem);
+                                SendReply(player, $"<color=#ffff00>Scrap limit reached. Stored {keepAmount} scrap, returned {excess} to inventory.</color>");
+                            }
+                        });
+                    }
+                }
+                else
+                {
+                    // Remove entire item
+                    item.RemoveFromContainer();
+                    timer.Once(0.1f, () =>
+                    {
+                        if (player != null && player.IsConnected && item != null)
+                        {
+                            player.GiveItem(item);
+                            SendReply(player, $"<color=#ff0000>Scrap storage full! Returned {item.amount} scrap to inventory.</color>");
+                        }
+                    });
+                }
+            }
+        }
         
         private object CanUseVending(BasePlayer player, VendingMachine machine)
         {
