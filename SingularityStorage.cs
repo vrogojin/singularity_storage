@@ -10,7 +10,7 @@ using System.Collections;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "3.5.3")]
+    [Info("SingularityStorage", "YourServer", "3.13.0")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
@@ -20,6 +20,7 @@ namespace Oxide.Plugins
         private Dictionary<ulong, PlayerStorageData> playerStorage = new Dictionary<ulong, PlayerStorageData>();
         private Dictionary<ulong, StorageTerminal> activeTerminals = new Dictionary<ulong, StorageTerminal>();
         private Dictionary<ulong, BaseEntity> playerActiveStorage = new Dictionary<ulong, BaseEntity>();
+        private Dictionary<ulong, uint> terminalTextureIds = new Dictionary<ulong, uint>(); // Track correct texture IDs
         
         private const string STORAGE_PREFAB = "assets/prefabs/deployable/large wood storage/box.wooden.large.prefab";
         private const string TERMINAL_PREFAB = "assets/prefabs/deployable/vendingmachine/vendingmachine.deployed.prefab";
@@ -142,6 +143,28 @@ namespace Oxide.Plugins
             if (config.AutoSpawnTerminals)
             {
                 timer.Once(3f, () => SpawnAllTerminals());
+            }
+            
+            // Start periodic texture check - check every 30 seconds for texture integrity
+            timer.Every(30f, () => CheckAndLoadNearbyTextures());
+            
+            // Schedule first periodic redraw
+            SchedulePeriodicRedraw();
+        }
+        
+        // Simple approach - just restore texture whenever it changes
+        private void OnSignUpdated(Signage sign, BasePlayer player)
+        {
+            if (sign == null) return;
+            
+            // Check if this sign belongs to a terminal
+            foreach (var terminal in activeTerminals.Values)
+            {
+                if (terminal?.DisplayEntity == sign)
+                {
+                    // Immediately restore the texture without any delay
+                    ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(sign, config.TerminalFaceTextureUrl));
+                }
             }
         }
         
@@ -370,12 +393,41 @@ namespace Oxide.Plugins
             
             var position = terminal.transform.position;
             var forward = Quaternion.Euler(0, rotation, 0) * Vector3.forward;
+            var backward = -forward;
             
-            // Position the picture frame on the face of the vending machine
-            // Vending machine is about 1.0 units deep, so we position the frame just in front
-            var framePosition = position + forward * 0.55f + Vector3.up * 2.2f; // High up, well clear of the panel
+            // First calculate where the frame would be on the vending machine
+            var defaultFramePosition = position + forward * 0.55f + Vector3.up * 2.2f;
             
-            var frameEntity = GameManager.server.CreateEntity(PICTURE_FRAME_PREFAB, framePosition, Quaternion.Euler(0, rotation, 0));
+            // Check for a wall behind the frame position
+            RaycastHit wallHit;
+            var rayStart = defaultFramePosition; // Start from where the frame would be
+            var wallFound = Physics.Raycast(rayStart, backward, out wallHit, 3f, LayerMask.GetMask("Construction", "Deployed", "World", "Terrain"));
+            
+            // Debug raycast
+            Puts($"[DEBUG] Raycast from {rayStart} in direction {backward}, hit: {wallFound}");
+            
+            Vector3 framePosition;
+            float frameRotation = rotation;
+            
+            if (wallFound)
+            {
+                // Attach to the wall
+                framePosition = wallHit.point + wallHit.normal * 0.05f; // Slightly off the wall
+                
+                // Calculate rotation to face away from the wall
+                var wallNormal = wallHit.normal;
+                frameRotation = Quaternion.LookRotation(wallNormal).eulerAngles.y;
+                
+                Puts($"[DEBUG] Wall found at {wallHit.point}, distance: {wallHit.distance}, normal: {wallHit.normal}, attaching sign to wall");
+            }
+            else
+            {
+                // No wall found, position on the vending machine as before
+                framePosition = defaultFramePosition;
+                Puts($"[DEBUG] No wall found, positioning sign on vending machine");
+            }
+            
+            var frameEntity = GameManager.server.CreateEntity(PICTURE_FRAME_PREFAB, framePosition, Quaternion.Euler(0, frameRotation, 0));
             if (frameEntity == null) 
             {
                 Puts($"[DEBUG] Failed to create picture frame entity");
@@ -396,9 +448,14 @@ namespace Oxide.Plugins
             {
                 if (frameEntity == null || frameEntity.IsDestroyed) return;
                 
-                // Lock the frame first
-                frameEntity.SetFlag(BaseEntity.Flags.Locked, true);
-                frameEntity.SendNetworkUpdate();
+                // Make the sign completely non-editable
+                var sign = frameEntity as Signage;
+                if (sign != null)
+                {
+                    // Just lock the frame
+                    sign.SetFlag(BaseEntity.Flags.Locked, true);
+                    sign.SendNetworkUpdate();
+                }
                 
                 // Apply the custom texture using SignArtist API
                 var url = config.TerminalFaceTextureUrl;
@@ -559,6 +616,9 @@ namespace Oxide.Plugins
                             sign.SetFlag(BaseEntity.Flags.Locked, true);
                             sign.SendNetworkUpdate();
                             
+                            // Store the correct texture ID for this terminal sign
+                            terminalTextureIds[sign.net.ID.Value] = textureId;
+                            
                             Puts($"[DEBUG] Applied texture ID {textureId} to sign entity {sign.net.ID}");
                         }
                         else
@@ -572,6 +632,100 @@ namespace Oxide.Plugins
                     }
                 }
             }
+        }
+        
+        private void CheckAndLoadNearbyTextures()
+        {
+            if (!config.UseCustomFaceTexture || activeTerminals.Count == 0) return;
+            
+            foreach (var terminal in activeTerminals.Values)
+            {
+                if (terminal?.DisplayEntity == null || terminal.DisplayEntity.IsDestroyed) continue;
+                
+                var sign = terminal.DisplayEntity as Signage;
+                if (sign == null) continue;
+                
+                // Ensure sign stays locked to prevent player drawing
+                if (!sign.HasFlag(BaseEntity.Flags.Locked))
+                {
+                    sign.SetFlag(BaseEntity.Flags.Locked, true);
+                    sign.SendNetworkUpdate();
+                }
+                
+                // Just keep it locked
+                sign.SetFlag(BaseEntity.Flags.Locked, true);
+                
+                // Check if texture needs to be loaded or restored
+                bool needsTexture = false;
+                bool forceRestore = false;
+                
+                if (sign.textureIDs == null || sign.textureIDs.Length == 0 || sign.textureIDs[0] == 0)
+                {
+                    // No texture loaded yet
+                    needsTexture = true;
+                }
+                else if (terminalTextureIds.ContainsKey(sign.net.ID.Value))
+                {
+                    // Check if texture has been modified by a player
+                    if (sign.textureIDs[0] != terminalTextureIds[sign.net.ID.Value])
+                    {
+                        // Texture was changed - restore it immediately
+                        needsTexture = true;
+                        forceRestore = true;
+                    }
+                }
+                else
+                {
+                    // We don't have a record of the correct texture ID yet
+                    needsTexture = true;
+                }
+                
+                if (needsTexture)
+                {
+                    // Always restore immediately if texture was changed
+                    if (forceRestore || needsTexture)
+                    {
+                        ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(sign, config.TerminalFaceTextureUrl));
+                    }
+                }
+            }
+        }
+        
+        private void SchedulePeriodicRedraw()
+        {
+            if (!config.UseCustomFaceTexture) return;
+            
+            // Random time between 10-13 minutes (600-780 seconds)
+            var randomDelay = UnityEngine.Random.Range(600f, 780f);
+            
+            Puts($"[DEBUG] Scheduling next periodic texture redraw in {randomDelay:F0} seconds ({randomDelay/60f:F1} minutes)");
+            
+            timer.Once(randomDelay, () =>
+            {
+                PeriodicRedrawAllTextures();
+                // Schedule the next redraw
+                SchedulePeriodicRedraw();
+            });
+        }
+        
+        private void PeriodicRedrawAllTextures()
+        {
+            if (!config.UseCustomFaceTexture || activeTerminals.Count == 0) return;
+            
+            Puts($"[DEBUG] Performing periodic texture redraw for all {activeTerminals.Count} terminals");
+            
+            foreach (var terminal in activeTerminals.Values)
+            {
+                if (terminal?.DisplayEntity == null || terminal.DisplayEntity.IsDestroyed) continue;
+                
+                var sign = terminal.DisplayEntity as Signage;
+                if (sign == null) continue;
+                
+                // Force redraw the texture
+                ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(sign, config.TerminalFaceTextureUrl));
+            }
+            
+            Puts($"[DEBUG] Periodic texture redraw completed");
         }
         
         #endregion
