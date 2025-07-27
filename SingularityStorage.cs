@@ -10,7 +10,7 @@ using System.Collections;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "3.13.0")]
+    [Info("SingularityStorage", "YourServer", "3.16.0")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
@@ -73,6 +73,9 @@ namespace Oxide.Plugins
             
             [JsonProperty("Use Custom Face Texture")]
             public bool UseCustomFaceTexture { get; set; } = true;
+            
+            [JsonProperty("Only Allow Resources And Components")]
+            public bool OnlyAllowResourcesAndComponents { get; set; } = true;
         }
         
         private class TerminalLocation
@@ -937,12 +940,78 @@ namespace Oxide.Plugins
                 return false;
             }
             
+            // Check if filtering is enabled
+            if (config.OnlyAllowResourcesAndComponents)
+            {
+                var category = item.info.category;
+                var shortname = item.info.shortname;
+                
+                // Allow resources category
+                if (category == ItemCategory.Resources)
+                {
+                    return true;
+                }
+                
+                // Allow components category
+                if (category == ItemCategory.Component)
+                {
+                    return true;
+                }
+                
+                // Special case: Scrap is categorized as "Items" but we want to allow it
+                if (shortname == "scrap")
+                {
+                    return true;
+                }
+                
+                // Reject everything else
+                SendReply(player, $"<color=#ff0000>Only resources and components can be stored in the Singularity Terminal. '{item.info.displayName.english}' is not allowed.</color>");
+                return false;
+            }
+            
             return true;
         }
         
         #endregion
         
         #region Hooks
+        
+        // Hook when item is added to any container
+        private void OnItemAddedToContainer(ItemContainer container, Item item)
+        {
+            if (container == null || item == null) return;
+            
+            // Check if this container belongs to one of our quantum storage entities
+            var storage = container.entityOwner as StorageContainer;
+            if (storage == null) return;
+            
+            // Find which player has this storage open
+            BasePlayer player = null;
+            foreach (var kvp in playerActiveStorage)
+            {
+                if (kvp.Value == storage)
+                {
+                    player = BasePlayer.FindByID(kvp.Key);
+                    break;
+                }
+            }
+            
+            if (player == null) return;
+            
+            // Check if we can store this item
+            if (!CanStoreItem(player, item))
+            {
+                // Remove the item from container and give it back to player
+                item.RemoveFromContainer();
+                timer.Once(0.1f, () =>
+                {
+                    if (player != null && player.IsConnected && item != null)
+                    {
+                        player.GiveItem(item);
+                    }
+                });
+            }
+        }
         
         private object CanUseVending(BasePlayer player, VendingMachine machine)
         {
