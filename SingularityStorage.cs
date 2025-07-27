@@ -10,7 +10,7 @@ using System.Collections;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "4.5.0")]
+    [Info("SingularityStorage", "YourServer", "4.5.3")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
@@ -184,24 +184,60 @@ namespace Oxide.Plugins
             
             Puts($"[DEBUG] Unloading plugin - cleaning up {activeTerminals.Count} terminals");
             
-            // Clean up terminals
-            int removedCount = 0;
+            // Note: Individual timers will be automatically cleaned up when plugin unloads
+            
+            // Clean up terminals and their display entities
+            int removedTerminals = 0;
+            int removedDisplays = 0;
+            
             foreach (var terminal in activeTerminals.Values.ToList())
             {
+                // Clean up display entity first
+                if (terminal?.DisplayEntity != null && !terminal.DisplayEntity.IsDestroyed)
+                {
+                    Puts($"[DEBUG] Removing display entity at {terminal.DisplayEntity.transform.position}");
+                    terminal.DisplayEntity.Kill();
+                    removedDisplays++;
+                }
+                else if (terminal?.DisplayEntity == null)
+                {
+                    Puts($"[DEBUG] Terminal has no DisplayEntity tracked");
+                }
+                
+                // Then clean up the terminal itself
                 if (terminal?.Entity != null && !terminal.Entity.IsDestroyed)
                 {
                     terminal.Entity.Kill();
-                    removedCount++;
-                }
-                
-                // Also clean up display entity
-                if (terminal?.DisplayEntity != null && !terminal.DisplayEntity.IsDestroyed)
-                {
-                    terminal.DisplayEntity.Kill();
+                    removedTerminals++;
                 }
             }
             
-            Puts($"[DEBUG] Removed {removedCount} terminals");
+            // Also find and remove any orphaned picture frames near terminals
+            Puts($"[DEBUG] Searching for orphaned picture frames near terminals");
+            
+            // Search near each terminal position for any picture frames
+            foreach (var terminal in activeTerminals.Values)
+            {
+                if (terminal?.Entity == null) continue;
+                
+                var terminalPos = terminal.Entity.transform.position;
+                var nearbyFrames = new List<BaseEntity>();
+                Vis.Entities(terminalPos, 5f, nearbyFrames, LayerMask.GetMask("Deployed"));
+                
+                Puts($"[DEBUG] Found {nearbyFrames.Count} deployed entities near terminal at {terminalPos}");
+                
+                foreach (var entity in nearbyFrames)
+                {
+                    if (entity is Signage && entity.PrefabName.Contains("pictureframe"))
+                    {
+                        Puts($"[DEBUG] Found and removing orphaned picture frame at {entity.transform.position}");
+                        entity.Kill();
+                        removedDisplays++;
+                    }
+                }
+            }
+            
+            Puts($"[DEBUG] Removed {removedTerminals} terminals and {removedDisplays} display entities");
             activeTerminals.Clear();
             
             // Clean up any open storage containers
@@ -1619,9 +1655,27 @@ namespace Oxide.Plugins
                 
             if (nearest != null && Vector3.Distance(nearest.Position, player.transform.position) < 10f)
             {
+                // Clean up display entity first
+                if (nearest.DisplayEntity != null && !nearest.DisplayEntity.IsDestroyed)
+                {
+                    nearest.DisplayEntity.Kill();
+                }
+                
+                // Also find and remove any orphaned picture frames nearby
+                var nearbyFrames = new List<BaseEntity>();
+                Vis.Entities(nearest.Position, 5f, nearbyFrames, LayerMask.GetMask("Deployed"));
+                
+                foreach (var entity in nearbyFrames)
+                {
+                    if (entity is Signage && entity.PrefabName.Contains("pictureframe"))
+                    {
+                        entity.Kill();
+                    }
+                }
+                
                 activeTerminals.Remove(nearest.Entity.net.ID.Value);
                 nearest.Entity.Kill();
-                SendReply(player, "<color=#ff0000>Terminal deactivated and removed.</color>");
+                SendReply(player, "<color=#ff0000>Terminal and display deactivated and removed.</color>");
             }
             else
             {
@@ -1657,22 +1711,50 @@ namespace Oxide.Plugins
         {
             SendReply(player, "<color=#ffff00>Wiping all unsaved terminals...</color>");
             
-            // First, destroy all active terminals
+            // First, destroy all active terminals and their display entities
             var terminalsToRemove = activeTerminals.Values.ToList();
-            var removedCount = 0;
+            var removedTerminals = 0;
+            var removedDisplays = 0;
             
             foreach (var terminal in terminalsToRemove)
             {
+                // Clean up display entity first
+                if (terminal?.DisplayEntity != null && !terminal.DisplayEntity.IsDestroyed)
+                {
+                    terminal.DisplayEntity.Kill();
+                    removedDisplays++;
+                }
+                
+                // Then clean up the terminal itself
                 if (terminal?.Entity != null && !terminal.Entity.IsDestroyed)
                 {
                     terminal.Entity.Kill();
-                    removedCount++;
+                    removedTerminals++;
+                }
+            }
+            
+            // Also find and remove any orphaned picture frames near terminals
+            foreach (var terminal in terminalsToRemove)
+            {
+                if (terminal?.Entity == null) continue;
+                
+                var terminalPos = terminal.Entity.transform.position;
+                var nearbyFrames = new List<BaseEntity>();
+                Vis.Entities(terminalPos, 5f, nearbyFrames, LayerMask.GetMask("Deployed"));
+                
+                foreach (var entity in nearbyFrames)
+                {
+                    if (entity is Signage && entity.PrefabName.Contains("pictureframe"))
+                    {
+                        entity.Kill();
+                        removedDisplays++;
+                    }
                 }
             }
             
             activeTerminals.Clear();
             
-            SendReply(player, $"<color=#ff0000>Removed {removedCount} terminals.</color>");
+            SendReply(player, $"<color=#ff0000>Removed {removedTerminals} terminals and {removedDisplays} picture frames.</color>");
             
             // Now respawn only the saved terminals
             if (config.TerminalLocations.Count > 0)
@@ -1694,16 +1776,44 @@ namespace Oxide.Plugins
         {
             SendReply(player, "<color=#ff0000>WIPING ALL TERMINALS AND SAVED POSITIONS!</color>");
             
-            // Destroy all active terminals
+            // Destroy all active terminals and their display entities
             var terminalsToRemove = activeTerminals.Values.ToList();
-            var removedCount = 0;
+            var removedTerminals = 0;
+            var removedDisplays = 0;
             
             foreach (var terminal in terminalsToRemove)
             {
+                // Clean up display entity first
+                if (terminal?.DisplayEntity != null && !terminal.DisplayEntity.IsDestroyed)
+                {
+                    terminal.DisplayEntity.Kill();
+                    removedDisplays++;
+                }
+                
+                // Then clean up the terminal itself
                 if (terminal?.Entity != null && !terminal.Entity.IsDestroyed)
                 {
                     terminal.Entity.Kill();
-                    removedCount++;
+                    removedTerminals++;
+                }
+            }
+            
+            // Also find and remove any orphaned picture frames near terminals
+            foreach (var terminal in terminalsToRemove)
+            {
+                if (terminal?.Entity == null) continue;
+                
+                var terminalPos = terminal.Entity.transform.position;
+                var nearbyFrames = new List<BaseEntity>();
+                Vis.Entities(terminalPos, 5f, nearbyFrames, LayerMask.GetMask("Deployed"));
+                
+                foreach (var entity in nearbyFrames)
+                {
+                    if (entity is Signage && entity.PrefabName.Contains("pictureframe"))
+                    {
+                        entity.Kill();
+                        removedDisplays++;
+                    }
                 }
             }
             
@@ -1713,7 +1823,7 @@ namespace Oxide.Plugins
             config.TerminalLocations.Clear();
             SaveConfig();
             
-            SendReply(player, $"<color=#ff0000>Removed {removedCount} terminals.</color>");
+            SendReply(player, $"<color=#ff0000>Removed {removedTerminals} terminals and {removedDisplays} picture frames.</color>");
             SendReply(player, "<color=#ff0000>Cleared all saved terminal positions.</color>");
             SendReply(player, "Use /singularityadmin spawn to create new terminals.");
         }
