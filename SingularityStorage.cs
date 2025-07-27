@@ -2,15 +2,19 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using Oxide.Core;
+using Oxide.Core.Plugins;
 using UnityEngine;
 using Newtonsoft.Json;
+using Rust;
+using System.Collections;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "3.0.0")]
+    [Info("SingularityStorage", "YourServer", "3.5.1")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
+        [PluginReference] private Plugin ImageLibrary;
         #region Fields
         
         private Dictionary<ulong, PlayerStorageData> playerStorage = new Dictionary<ulong, PlayerStorageData>();
@@ -19,8 +23,10 @@ namespace Oxide.Plugins
         
         private const string STORAGE_PREFAB = "assets/prefabs/deployable/large wood storage/box.wooden.large.prefab";
         private const string TERMINAL_PREFAB = "assets/prefabs/deployable/vendingmachine/vendingmachine.deployed.prefab";
+        private const string PICTURE_FRAME_PREFAB = "assets/prefabs/deployable/signs/sign.pictureframe.portrait.prefab";
         private const string PERMISSION_USE = "singularitystorage.use";
         private const string PERMISSION_ADMIN = "singularitystorage.admin";
+        private const string TERMINAL_FACE_IMAGE = "singularity_terminal_face";
         
         private Configuration config;
         
@@ -60,6 +66,12 @@ namespace Oxide.Plugins
             
             [JsonProperty("Terminal Skin ID")]
             public ulong TerminalSkinId { get; set; } = 1751033540; // Red vending machine
+            
+            [JsonProperty("Terminal Face Texture URL")]
+            public string TerminalFaceTextureUrl { get; set; } = "https://vrogojin.github.io/singularity_storage/singularity_terminal_sign.png";
+            
+            [JsonProperty("Use Custom Face Texture")]
+            public bool UseCustomFaceTexture { get; set; } = true;
         }
         
         private class TerminalLocation
@@ -100,6 +112,7 @@ namespace Oxide.Plugins
             public Vector3 Position { get; set; }
             public MonumentInfo Monument { get; set; }
             public Vector3 RelativePosition { get; set; }
+            public BaseEntity DisplayEntity { get; set; }
         }
         
         #endregion
@@ -118,6 +131,13 @@ namespace Oxide.Plugins
         {
             LoadConfig();
             Puts($"[DEBUG] Config loaded - Terminal Skin ID: {config.TerminalSkinId}");
+            
+            // Load custom texture if enabled
+            if (config.UseCustomFaceTexture && ImageLibrary != null)
+            {
+                ImageLibrary.Call<bool>("AddImage", config.TerminalFaceTextureUrl, TERMINAL_FACE_IMAGE, 0UL);
+                Puts($"[DEBUG] Loading custom terminal face texture from: {config.TerminalFaceTextureUrl}");
+            }
             
             if (config.AutoSpawnTerminals)
             {
@@ -139,6 +159,12 @@ namespace Oxide.Plugins
                 {
                     terminal.Entity.Kill();
                     removedCount++;
+                }
+                
+                // Also clean up display entity
+                if (terminal?.DisplayEntity != null && !terminal.DisplayEntity.IsDestroyed)
+                {
+                    terminal.DisplayEntity.Kill();
                 }
             }
             
@@ -272,23 +298,20 @@ namespace Oxide.Plugins
                 return;
             }
             
+            entity.skinID = config.TerminalSkinId;
             entity.enableSaving = false;
+            
+            entity.Spawn();
             
             var vendingMachine = entity as VendingMachine;
             if (vendingMachine != null)
             {
                 vendingMachine.shopName = config.TerminalDisplayName;
                 vendingMachine.skinID = config.TerminalSkinId;
-                Puts($"[DEBUG] Setting terminal skin ID to: {config.TerminalSkinId}");
+                Puts($"[DEBUG] Post-spawn - Setting skinID to: {config.TerminalSkinId}");
                 vendingMachine.SetFlag(BaseEntity.Flags.Reserved1, true);
-            }
-            
-            entity.Spawn();
-            
-            if (vendingMachine != null)
-            {
-                vendingMachine.SendNetworkUpdate();
-                Puts($"[DEBUG] Sent network update");
+                vendingMachine.SendNetworkUpdateImmediate();
+                Puts($"[DEBUG] Final skinID after network update: {vendingMachine.skinID}");
             }
             
             var terminal = new StorageTerminal
@@ -300,6 +323,12 @@ namespace Oxide.Plugins
             };
             
             activeTerminals[entity.net.ID.Value] = terminal;
+            
+            // Spawn picture frame with custom texture if enabled
+            if (config.UseCustomFaceTexture && ImageLibrary != null)
+            {
+                timer.Once(0.5f, () => SpawnTerminalDisplay(entity, rotation));
+            }
         }
         
         private string GetCardinalName(float rotation)
@@ -333,6 +362,64 @@ namespace Oxide.Plugins
                 return 180f;    // South
             else
                 return 270f;    // West
+        }
+        
+        private void SpawnTerminalDisplay(BaseEntity terminal, float rotation)
+        {
+            if (terminal == null || !terminal.IsValid()) return;
+            
+            var position = terminal.transform.position;
+            
+            // Position the picture frame on top of the vending machine
+            var framePosition = position + Vector3.up * 1.9f; // Just above the vending machine
+            
+            var frameEntity = GameManager.server.CreateEntity(PICTURE_FRAME_PREFAB, framePosition, Quaternion.Euler(0, rotation, 0));
+            if (frameEntity == null) 
+            {
+                Puts($"[DEBUG] Failed to create picture frame entity");
+                return;
+            }
+            
+            frameEntity.enableSaving = false;
+            frameEntity.Spawn();
+            
+            // Store reference to display entity immediately
+            if (activeTerminals.TryGetValue(terminal.net.ID.Value, out var terminalData))
+            {
+                terminalData.DisplayEntity = frameEntity;
+            }
+            
+            // Wait for the entity to fully spawn before applying texture
+            timer.Once(1f, () =>
+            {
+                if (frameEntity == null || frameEntity.IsDestroyed) return;
+                
+                // Lock the frame first
+                frameEntity.SetFlag(BaseEntity.Flags.Locked, true);
+                frameEntity.SendNetworkUpdate();
+                
+                // Apply the custom texture using SignArtist API
+                var url = config.TerminalFaceTextureUrl;
+                Puts($"[DEBUG] Attempting to paint image from URL: {url}");
+                
+                // First ensure the image is loaded in ImageLibrary
+                if (ImageLibrary != null)
+                {
+                    // Force ImageLibrary to download and store the image
+                    ImageLibrary.Call("AddImage", url, TERMINAL_FACE_IMAGE, (ulong)0);
+                    
+                    // Try direct image loading approach
+                    timer.Once(2f, () =>
+                    {
+                        if (frameEntity == null || frameEntity.IsDestroyed) return;
+                        
+                        // Start coroutine to download and apply image
+                        ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(frameEntity, url));
+                    });
+                }
+                
+                Puts($"[DEBUG] Spawned picture frame at {framePosition}");
+            });
         }
         
         private Vector3 SnapToGround(Vector3 position)
@@ -430,6 +517,59 @@ namespace Oxide.Plugins
             displayName = System.Text.RegularExpressions.Regex.Replace(displayName, @"\s*\d+$", "");
             
             return displayName;
+        }
+        
+        private IEnumerator DownloadAndApplyImage(BaseEntity signEntity, string url)
+        {
+            Puts($"[DEBUG] Starting image download from: {url}");
+            
+            using (var www = new WWW(url))
+            {
+                yield return www;
+                
+                if (!string.IsNullOrEmpty(www.error))
+                {
+                    Puts($"[ERROR] Failed to download image: {www.error}");
+                    yield break;
+                }
+                
+                if (www.bytes == null || www.bytes.Length == 0)
+                {
+                    Puts($"[ERROR] Downloaded image is empty");
+                    yield break;
+                }
+                
+                Puts($"[DEBUG] Downloaded image, size: {www.bytes.Length} bytes");
+                
+                // Apply image to sign
+                var sign = signEntity as Signage;
+                if (sign != null && !sign.IsDestroyed)
+                {
+                    try
+                    {
+                        // Store the image data
+                        var textureId = FileStorage.server.Store(www.bytes, FileStorage.Type.png, sign.net.ID);
+                        
+                        // Apply texture to sign - picture frames have only one texture slot
+                        if (sign.textureIDs != null && sign.textureIDs.Length > 0)
+                        {
+                            sign.textureIDs[0] = textureId;
+                            sign.SetFlag(BaseEntity.Flags.Locked, true);
+                            sign.SendNetworkUpdate();
+                            
+                            Puts($"[DEBUG] Applied texture ID {textureId} to sign entity {sign.net.ID}");
+                        }
+                        else
+                        {
+                            Puts($"[ERROR] Sign has no texture slots available");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Puts($"[ERROR] Failed to apply texture: {ex.Message}");
+                    }
+                }
+            }
         }
         
         #endregion
