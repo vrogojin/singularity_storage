@@ -10,7 +10,7 @@ using System.Collections;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "3.5.1")]
+    [Info("SingularityStorage", "YourServer", "3.5.3")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
@@ -369,9 +369,11 @@ namespace Oxide.Plugins
             if (terminal == null || !terminal.IsValid()) return;
             
             var position = terminal.transform.position;
+            var forward = Quaternion.Euler(0, rotation, 0) * Vector3.forward;
             
-            // Position the picture frame on top of the vending machine
-            var framePosition = position + Vector3.up * 1.9f; // Just above the vending machine
+            // Position the picture frame on the face of the vending machine
+            // Vending machine is about 1.0 units deep, so we position the frame just in front
+            var framePosition = position + forward * 0.55f + Vector3.up * 2.2f; // High up, well clear of the panel
             
             var frameEntity = GameManager.server.CreateEntity(PICTURE_FRAME_PREFAB, framePosition, Quaternion.Euler(0, rotation, 0));
             if (frameEntity == null) 
