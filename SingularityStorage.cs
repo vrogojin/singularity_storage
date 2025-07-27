@@ -10,7 +10,7 @@ using System.Collections;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "3.16.0")]
+    [Info("SingularityStorage", "YourServer", "4.3.0")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
@@ -27,6 +27,10 @@ namespace Oxide.Plugins
         private const string PICTURE_FRAME_PREFAB = "assets/prefabs/deployable/signs/sign.pictureframe.portrait.prefab";
         private const string PERMISSION_USE = "singularitystorage.use";
         private const string PERMISSION_ADMIN = "singularitystorage.admin";
+        private const string PERMISSION_TIER2 = "singularitystorage.tier2";
+        private const string PERMISSION_TIER3 = "singularitystorage.tier3";
+        private const string PERMISSION_TIER4 = "singularitystorage.tier4";
+        private const string PERMISSION_TIER5 = "singularitystorage.tier5";
         private const string TERMINAL_FACE_IMAGE = "singularity_terminal_face";
         
         private Configuration config;
@@ -37,8 +41,6 @@ namespace Oxide.Plugins
         
         private class Configuration
         {
-            [JsonProperty("Storage Slots")]
-            public int StorageSlots { get; set; } = 48;
             
             [JsonProperty("Allow Blacklisted Items")]
             public bool AllowBlacklistedItems { get; set; } = false;
@@ -93,6 +95,7 @@ namespace Oxide.Plugins
             public ulong PlayerId { get; set; }
             public List<ItemData> Items { get; set; } = new List<ItemData>();
             public DateTime LastAccessed { get; set; }
+            public int StorageTier { get; set; } = 1; // Default tier 1
         }
         
         private class ItemData
@@ -127,6 +130,10 @@ namespace Oxide.Plugins
         {
             permission.RegisterPermission(PERMISSION_USE, this);
             permission.RegisterPermission(PERMISSION_ADMIN, this);
+            permission.RegisterPermission(PERMISSION_TIER2, this);
+            permission.RegisterPermission(PERMISSION_TIER3, this);
+            permission.RegisterPermission(PERMISSION_TIER4, this);
+            permission.RegisterPermission(PERMISSION_TIER5, this);
             
             LoadData();
         }
@@ -757,10 +764,14 @@ namespace Oxide.Plugins
             storage.SendNetworkUpdate();
             storage.Spawn();
             
-            // Set inventory size
-            storage.inventory.capacity = config.StorageSlots;
+            // Set inventory size based on player's tier
+            var tier = GetPlayerStorageTier(player);
+            var slots = GetTierSlots(tier);
+            storage.inventory.capacity = slots;
             storage.panelName = "generic_resizable";
             storage.isLootable = true;
+            
+            // We'll use a different approach to show the tier in the UI
             
             // Load saved items
             var playerData = GetPlayerStorage(player.userID);
@@ -782,6 +793,10 @@ namespace Oxide.Plugins
                     player.inventory.loot.MarkDirty();
                     player.inventory.loot.SendImmediate();
                     player.ClientRPCPlayer(null, player, "RPC_OpenLootPanel", "generic_resizable");
+                    
+                    // Send a message showing the tier
+                    var tier = GetPlayerStorageTier(player);
+                    SendReply(player, $"<color=#00ff00>Opened Singularity Storage Level {tier}</color>");
                     
                     // Listen for inventory changes
                     storage.inventory.onDirty += () => OnStorageChanged(player, storage);
@@ -933,8 +948,113 @@ namespace Oxide.Plugins
             }
         }
         
+        private int GetPlayerStorageTier(BasePlayer player)
+        {
+            if (permission.UserHasPermission(player.UserIDString, PERMISSION_TIER5))
+                return 5;
+            if (permission.UserHasPermission(player.UserIDString, PERMISSION_TIER4))
+                return 4;
+            if (permission.UserHasPermission(player.UserIDString, PERMISSION_TIER3))
+                return 3;
+            if (permission.UserHasPermission(player.UserIDString, PERMISSION_TIER2))
+                return 2;
+            return 1; // Default tier 1 for basic use permission
+        }
+        
+        private int GetTierSlots(int tier)
+        {
+            switch (tier)
+            {
+                case 1: return 6;
+                case 2: return 12;
+                case 3: return 24;
+                case 4: return 48;
+                case 5: return 96;
+                default: return 6;
+            }
+        }
+        
+        private int GetTierScrapLimit(int tier)
+        {
+            switch (tier)
+            {
+                case 1: return 1000;
+                case 2: return 5000;
+                case 3: return 10000;
+                case 4: return 25000;
+                case 5: return -1; // No limit
+                default: return 1000;
+            }
+        }
+        
+        private int GetCurrentScrapTotal(ulong playerId, ItemContainer container)
+        {
+            var savedScrap = 0;
+            var playerData = GetPlayerStorage(playerId);
+            
+            // Count saved scrap
+            foreach (var item in playerData.Items)
+            {
+                if (item.ItemId == -932201673) // Scrap item ID
+                {
+                    savedScrap += item.Amount;
+                }
+            }
+            
+            // Count scrap in container
+            var containerScrap = 0;
+            if (container != null)
+            {
+                for (int i = 0; i < container.capacity; i++)
+                {
+                    var containerItem = container.GetSlot(i);
+                    if (containerItem != null && containerItem.info.shortname == "scrap")
+                    {
+                        containerScrap += containerItem.amount;
+                    }
+                }
+            }
+            
+            return savedScrap + containerScrap;
+        }
+        
+        private int GetPlayerScrapInStorage(ulong playerId)
+        {
+            var playerData = GetPlayerStorage(playerId);
+            var scrapCount = 0;
+            
+            foreach (var item in playerData.Items)
+            {
+                if (item.ItemId == -932201673) // Scrap item ID
+                {
+                    scrapCount += item.Amount;
+                }
+            }
+            
+            // Also check if player has active storage open and count scrap in there
+            if (playerActiveStorage.ContainsKey(playerId))
+            {
+                var storage = playerActiveStorage[playerId] as StorageContainer;
+                if (storage != null && !storage.IsDestroyed)
+                {
+                    for (int i = 0; i < storage.inventory.capacity; i++)
+                    {
+                        var containerItem = storage.inventory.GetSlot(i);
+                        if (containerItem != null && containerItem.info.shortname == "scrap")
+                        {
+                            scrapCount += containerItem.amount;
+                        }
+                    }
+                }
+            }
+            
+            return scrapCount;
+        }
+        
         private bool CanStoreItem(BasePlayer player, Item item)
         {
+            Puts($"[DEBUG] CanStoreItem called for {item.info.shortname}");
+            
             if (!config.AllowBlacklistedItems && config.BlacklistedItems.Contains(item.info.shortname))
             {
                 return false;
@@ -961,6 +1081,27 @@ namespace Oxide.Plugins
                 // Special case: Scrap is categorized as "Items" but we want to allow it
                 if (shortname == "scrap")
                 {
+                    // Check scrap limit for player's tier
+                    var tier = GetPlayerStorageTier(player);
+                    var scrapLimit = GetTierScrapLimit(tier);
+                    
+                    Puts($"[DEBUG] Scrap check - Player: {player.displayName}, Tier: {tier}, Limit: {scrapLimit}");
+                    
+                    if (scrapLimit != -1) // If there's a limit
+                    {
+                        // Get current scrap amount in storage
+                        var currentScrap = GetPlayerScrapInStorage(player.userID);
+                        var totalAfterAdd = currentScrap + item.amount;
+                        
+                        Puts($"[DEBUG] Current scrap: {currentScrap}, Adding: {item.amount}, Total would be: {totalAfterAdd}");
+                        
+                        if (totalAfterAdd > scrapLimit)
+                        {
+                            SendReply(player, $"<color=#ff0000>Scrap limit for Tier {tier} is {scrapLimit:N0}. You currently have {currentScrap:N0} stored. Cannot add {item.amount} more.</color>");
+                            return false;
+                        }
+                    }
+                    
                     return true;
                 }
                 
@@ -976,14 +1117,14 @@ namespace Oxide.Plugins
         
         #region Hooks
         
-        // Hook when item is added to any container
-        private void OnItemAddedToContainer(ItemContainer container, Item item)
+        // Hook to check if container can accept item BEFORE it's added
+        private object CanAcceptItem(ItemContainer container, Item item, int targetPos)
         {
-            if (container == null || item == null) return;
+            if (container == null || item == null) return null;
             
             // Check if this container belongs to one of our quantum storage entities
             var storage = container.entityOwner as StorageContainer;
-            if (storage == null) return;
+            if (storage == null) return null;
             
             // Find which player has this storage open
             BasePlayer player = null;
@@ -996,22 +1137,41 @@ namespace Oxide.Plugins
                 }
             }
             
-            if (player == null) return;
+            if (player == null) return null;
             
-            // Check if we can store this item
+            Puts($"[DEBUG] CanAcceptItem called for {item.info.shortname}, amount: {item.amount}");
+            
+            // Check scrap limits
+            if (item.info.shortname == "scrap")
+            {
+                var tier = GetPlayerStorageTier(player);
+                var scrapLimit = GetTierScrapLimit(tier);
+                
+                if (scrapLimit != -1)
+                {
+                    // Get current scrap (saved + in container)
+                    var currentScrap = GetCurrentScrapTotal(player.userID, container);
+                    var totalAfterAdd = currentScrap + item.amount;
+                    
+                    Puts($"[DEBUG] Scrap limit check - Current: {currentScrap}, Adding: {item.amount}, Total: {totalAfterAdd}, Limit: {scrapLimit}");
+                    
+                    if (totalAfterAdd > scrapLimit)
+                    {
+                        SendReply(player, $"<color=#ff0000>Cannot add {item.amount} scrap. Tier {tier} limit is {scrapLimit:N0}, you have {currentScrap:N0}.</color>");
+                        return ItemContainer.CanAcceptResult.CannotAccept;
+                    }
+                }
+            }
+            
+            // Check general item restrictions
             if (!CanStoreItem(player, item))
             {
-                // Remove the item from container and give it back to player
-                item.RemoveFromContainer();
-                timer.Once(0.1f, () =>
-                {
-                    if (player != null && player.IsConnected && item != null)
-                    {
-                        player.GiveItem(item);
-                    }
-                });
+                return ItemContainer.CanAcceptResult.CannotAccept;
             }
+            
+            return null;
         }
+        
         
         private object CanUseVending(BasePlayer player, VendingMachine machine)
         {
@@ -1100,10 +1260,25 @@ namespace Oxide.Plugins
             {
                 case "info":
                     var storage = GetPlayerStorage(player.userID);
+                    var tier = GetPlayerStorageTier(player);
+                    var slots = GetTierSlots(tier);
                     SendReply(player, $"<color=#00ff00>Singularity Storage Metrics:</color>");
-                    SendReply(player, $"Quantum items stored: {storage.Items.Count}/{config.StorageSlots}");
+                    SendReply(player, $"Storage Tier: {tier} ({slots} slots)");
+                    SendReply(player, $"Quantum items stored: {storage.Items.Count}/{slots}");
                     SendReply(player, $"Last quantum sync: {storage.LastAccessed:yyyy-MM-dd HH:mm} UTC");
-                    SendReply(player, $"Storage capacity: {(storage.Items.Count * 100.0 / config.StorageSlots):F1}%");
+                    SendReply(player, $"Storage capacity: {(storage.Items.Count * 100.0 / slots):F1}%");
+                    
+                    // Show scrap limit info
+                    var scrapLimit = GetTierScrapLimit(tier);
+                    var currentScrap = GetPlayerScrapInStorage(player.userID);
+                    if (scrapLimit != -1)
+                    {
+                        SendReply(player, $"Scrap stored: {currentScrap:N0}/{scrapLimit:N0} ({(currentScrap * 100.0 / scrapLimit):F1}%)");
+                    }
+                    else
+                    {
+                        SendReply(player, $"Scrap stored: {currentScrap:N0} (no limit)");
+                    }
                     break;
                     
                 case "terminals":
@@ -1128,7 +1303,17 @@ namespace Oxide.Plugins
                     SendReply(player, "<color=#00ff00>Singularity Storage - Help</color>");
                     SendReply(player, "Access terminals at major monuments to store items.");
                     SendReply(player, "Items persist through server wipes and map changes.");
-                    SendReply(player, $"Current capacity: {config.StorageSlots} slots");
+                    var currentTier = GetPlayerStorageTier(player);
+                    var currentSlots = GetTierSlots(currentTier);
+                    var currentScrapLimit = GetTierScrapLimit(currentTier);
+                    var scrapLimitText = currentScrapLimit == -1 ? "no limit" : $"{currentScrapLimit:N0}";
+                    SendReply(player, $"Your storage tier: {currentTier} ({currentSlots} slots, {scrapLimitText} scrap limit)");
+                    if (currentTier < 5)
+                    {
+                        var nextScrapLimit = GetTierScrapLimit(currentTier + 1);
+                        var nextScrapText = nextScrapLimit == -1 ? "no limit" : $"{nextScrapLimit:N0}";
+                        SendReply(player, $"<color=#ffff00>Next tier: {currentTier + 1} ({GetTierSlots(currentTier + 1)} slots, {nextScrapText} scrap)</color>");
+                    }
                     if (!config.AllowBlacklistedItems && config.BlacklistedItems.Count > 0)
                     {
                         SendReply(player, "Note: Explosive items cannot be stored.");
@@ -1584,9 +1769,13 @@ namespace Oxide.Plugins
                 }
                 
                 var storage = playerStorage[target.userID];
+                var targetPlayer = BasePlayer.FindByID(target.userID);
+                var targetTier = targetPlayer != null ? GetPlayerStorageTier(targetPlayer) : 1;
+                var targetSlots = GetTierSlots(targetTier);
                 SendReply(player, $"<color=#00ff00>Storage Stats for {target.displayName}:</color>");
-                SendReply(player, $"Items stored: {storage.Items.Count}/{config.StorageSlots}");
-                SendReply(player, $"Storage usage: {(storage.Items.Count * 100.0 / config.StorageSlots):F1}%");
+                SendReply(player, $"Storage Tier: {targetTier} ({targetSlots} slots)");
+                SendReply(player, $"Items stored: {storage.Items.Count}/{targetSlots}");
+                SendReply(player, $"Storage usage: {(storage.Items.Count * 100.0 / targetSlots):F1}%");
                 SendReply(player, $"Last accessed: {storage.LastAccessed:yyyy-MM-dd HH:mm} UTC");
                 
                 // Show item breakdown by category
