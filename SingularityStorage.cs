@@ -70,13 +70,13 @@ namespace Oxide.Plugins
             public string TerminalDisplayName { get; set; } = "Singularity Storage Terminal";
             
             [JsonProperty("Terminal Skin ID")]
-            public ulong TerminalSkinId { get; set; } = 1751033540; // Red vending machine
+            public ulong TerminalSkinId { get; set; } = 1920833688; // Green vending machine
             
             [JsonProperty("Terminal Face Texture URL")]
             public string TerminalFaceTextureUrl { get; set; } = "https://vrogojin.github.io/singularity_storage/singularity_terminal_sign.png";
             
-            [JsonProperty("Use Custom Face Texture")]
-            public bool UseCustomFaceTexture { get; set; } = true;
+            [JsonProperty("Use Custom Face Texture (Deprecated)")]
+            public bool UseCustomFaceTexture { get; set; } = false; // No longer used - using green skin instead
             
             [JsonProperty("Only Allow Resources And Components")]
             public bool OnlyAllowResourcesAndComponents { get; set; } = true;
@@ -256,28 +256,20 @@ namespace Oxide.Plugins
                 timer.Once(3f, () => SpawnAllTerminals());
             }
             
-            // Start periodic texture check - check every 30 seconds for texture integrity
-            timer.Every(30f, () => CheckAndLoadNearbyTextures());
+            // Picture frame texture check no longer needed - using green vending machine skin
+            // timer.Every(30f, () => CheckAndLoadNearbyTextures());
             
             // Schedule first periodic redraw
             SchedulePeriodicRedraw();
         }
         
-        // Simple approach - just restore texture whenever it changes
+        // Picture frame handling removed - using green vending machine skin
+        /*
         private void OnSignUpdated(Signage sign, BasePlayer player)
         {
-            if (sign == null) return;
-            
-            // Check if this sign belongs to a terminal
-            foreach (var terminal in activeTerminals.Values)
-            {
-                if (terminal?.DisplayEntity == sign)
-                {
-                    // Immediately restore the texture without any delay
-                    ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(sign, config.TerminalFaceTextureUrl));
-                }
-            }
+            // Removed - no longer using picture frames
         }
+        */
         
         // Prevent players from rotating singularity terminals and displays
         private object OnHammerHit(BasePlayer player, HitInfo info)
@@ -411,32 +403,9 @@ namespace Oxide.Plugins
                 }
             }
             
-            // Also find and remove any orphaned picture frames near terminals
-            Puts($"[DEBUG] Searching for orphaned picture frames near terminals");
+            // Picture frame cleanup no longer needed - using green vending machine skin
             
-            // Search near each terminal position for any picture frames
-            foreach (var terminal in activeTerminals.Values)
-            {
-                if (terminal?.Entity == null) continue;
-                
-                var terminalPos = terminal.Entity.transform.position;
-                var nearbyFrames = new List<BaseEntity>();
-                Vis.Entities(terminalPos, 5f, nearbyFrames, LayerMask.GetMask("Deployed"));
-                
-                Puts($"[DEBUG] Found {nearbyFrames.Count} deployed entities near terminal at {terminalPos}");
-                
-                foreach (var entity in nearbyFrames)
-                {
-                    if (entity is Signage && entity.PrefabName.Contains("pictureframe"))
-                    {
-                        Puts($"[DEBUG] Found and removing orphaned picture frame at {entity.transform.position}");
-                        entity.Kill();
-                        removedDisplays++;
-                    }
-                }
-            }
-            
-            Puts($"[DEBUG] Removed {removedTerminals} terminals and {removedDisplays} display entities");
+            Puts($"[DEBUG] Removed {removedTerminals} terminals");
             activeTerminals.Clear();
             
             // Clean up any open storage containers
@@ -594,12 +563,6 @@ namespace Oxide.Plugins
             };
             
             activeTerminals[entity.net.ID.Value] = terminal;
-            
-            // Spawn picture frame with custom texture if enabled
-            if (config.UseCustomFaceTexture && ImageLibrary != null)
-            {
-                timer.Once(0.5f, () => SpawnTerminalDisplay(entity, rotation));
-            }
         }
         
         private string GetCardinalName(float rotation)
@@ -635,99 +598,13 @@ namespace Oxide.Plugins
                 return 270f;    // West
         }
         
+        // Picture frame display removed - using green vending machine skin instead
+        /*
         private void SpawnTerminalDisplay(BaseEntity terminal, float rotation)
         {
-            if (terminal == null || !terminal.IsValid()) return;
-            
-            var position = terminal.transform.position;
-            var forward = Quaternion.Euler(0, rotation, 0) * Vector3.forward;
-            var backward = -forward;
-            
-            // First calculate where the frame would be on the vending machine
-            var defaultFramePosition = position + forward * 0.55f + Vector3.up * 2.2f;
-            
-            // Check for a wall behind the frame position
-            RaycastHit wallHit;
-            var rayStart = defaultFramePosition; // Start from where the frame would be
-            var wallFound = Physics.Raycast(rayStart, backward, out wallHit, 3f, LayerMask.GetMask("Construction", "Deployed", "World", "Terrain"));
-            
-            // Debug raycast
-            Puts($"[DEBUG] Raycast from {rayStart} in direction {backward}, hit: {wallFound}");
-            
-            Vector3 framePosition;
-            float frameRotation = rotation;
-            
-            if (wallFound)
-            {
-                // Attach to the wall
-                framePosition = wallHit.point + wallHit.normal * 0.05f; // Slightly off the wall
-                
-                // Calculate rotation to face away from the wall
-                var wallNormal = wallHit.normal;
-                frameRotation = Quaternion.LookRotation(wallNormal).eulerAngles.y;
-                
-                Puts($"[DEBUG] Wall found at {wallHit.point}, distance: {wallHit.distance}, normal: {wallHit.normal}, attaching sign to wall");
-            }
-            else
-            {
-                // No wall found, position on the vending machine as before
-                framePosition = defaultFramePosition;
-                Puts($"[DEBUG] No wall found, positioning sign on vending machine");
-            }
-            
-            var frameEntity = GameManager.server.CreateEntity(PICTURE_FRAME_PREFAB, framePosition, Quaternion.Euler(0, frameRotation, 0));
-            if (frameEntity == null) 
-            {
-                Puts($"[DEBUG] Failed to create picture frame entity");
-                return;
-            }
-            
-            frameEntity.enableSaving = false;
-            frameEntity.Spawn();
-            
-            // Store reference to display entity immediately
-            if (activeTerminals.TryGetValue(terminal.net.ID.Value, out var terminalData))
-            {
-                terminalData.DisplayEntity = frameEntity;
-            }
-            
-            // Wait for the entity to fully spawn before applying texture
-            timer.Once(1f, () =>
-            {
-                if (frameEntity == null || frameEntity.IsDestroyed) return;
-                
-                // Make the sign completely non-editable
-                var sign = frameEntity as Signage;
-                if (sign != null)
-                {
-                    // Just lock the frame
-                    sign.SetFlag(BaseEntity.Flags.Locked, true);
-                    sign.SendNetworkUpdate();
-                }
-                
-                // Apply the custom texture using SignArtist API
-                var url = config.TerminalFaceTextureUrl;
-                Puts($"[DEBUG] Attempting to paint image from URL: {url}");
-                
-                // First ensure the image is loaded in ImageLibrary
-                if (ImageLibrary != null)
-                {
-                    // Force ImageLibrary to download and store the image
-                    ImageLibrary.Call("AddImage", url, TERMINAL_FACE_IMAGE, (ulong)0);
-                    
-                    // Try direct image loading approach
-                    timer.Once(2f, () =>
-                    {
-                        if (frameEntity == null || frameEntity.IsDestroyed) return;
-                        
-                        // Start coroutine to download and apply image
-                        ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(frameEntity, url));
-                    });
-                }
-                
-                Puts($"[DEBUG] Spawned picture frame at {framePosition}");
-            });
+            // Removed - no longer using picture frames
         }
+        */
         
         private Vector3 SnapToGround(Vector3 position)
         {
@@ -826,61 +703,13 @@ namespace Oxide.Plugins
             return displayName;
         }
         
+        // Image download removed - using green vending machine skin instead
+        /*
         private IEnumerator DownloadAndApplyImage(BaseEntity signEntity, string url)
         {
-            Puts($"[DEBUG] Starting image download from: {url}");
-            
-            using (var www = new WWW(url))
-            {
-                yield return www;
-                
-                if (!string.IsNullOrEmpty(www.error))
-                {
-                    Puts($"[ERROR] Failed to download image: {www.error}");
-                    yield break;
-                }
-                
-                if (www.bytes == null || www.bytes.Length == 0)
-                {
-                    Puts($"[ERROR] Downloaded image is empty");
-                    yield break;
-                }
-                
-                Puts($"[DEBUG] Downloaded image, size: {www.bytes.Length} bytes");
-                
-                // Apply image to sign
-                var sign = signEntity as Signage;
-                if (sign != null && !sign.IsDestroyed)
-                {
-                    try
-                    {
-                        // Store the image data
-                        var textureId = FileStorage.server.Store(www.bytes, FileStorage.Type.png, sign.net.ID);
-                        
-                        // Apply texture to sign - picture frames have only one texture slot
-                        if (sign.textureIDs != null && sign.textureIDs.Length > 0)
-                        {
-                            sign.textureIDs[0] = textureId;
-                            sign.SetFlag(BaseEntity.Flags.Locked, true);
-                            sign.SendNetworkUpdate();
-                            
-                            // Store the correct texture ID for this terminal sign
-                            terminalTextureIds[sign.net.ID.Value] = textureId;
-                            
-                            Puts($"[DEBUG] Applied texture ID {textureId} to sign entity {sign.net.ID}");
-                        }
-                        else
-                        {
-                            Puts($"[ERROR] Sign has no texture slots available");
-                        }
-                    }
-                    catch (Exception ex)
-                    {
-                        Puts($"[ERROR] Failed to apply texture: {ex.Message}");
-                    }
-                }
-            }
+            // Removed - no longer using picture frames
         }
+        */
         
         private void CheckAndLoadNearbyTextures()
         {
@@ -930,17 +759,15 @@ namespace Oxide.Plugins
                 
                 if (needsTexture)
                 {
-                    // Always restore immediately if texture was changed
-                    if (forceRestore || needsTexture)
-                    {
-                        ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(sign, config.TerminalFaceTextureUrl));
-                    }
+                    // Picture frames no longer used - using green vending machine skin
+                    // ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(sign, config.TerminalFaceTextureUrl));
                 }
             }
         }
         
         private void SchedulePeriodicRedraw()
         {
+            return; // Picture frames no longer used - using green vending machine skin
             if (!config.UseCustomFaceTexture) return;
             
             // Random time between 10-13 minutes (600-780 seconds)
@@ -969,8 +796,8 @@ namespace Oxide.Plugins
                 var sign = terminal.DisplayEntity as Signage;
                 if (sign == null) continue;
                 
-                // Force redraw the texture
-                ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(sign, config.TerminalFaceTextureUrl));
+                // Picture frames no longer used - using green vending machine skin
+                // ServerMgr.Instance.StartCoroutine(DownloadAndApplyImage(sign, config.TerminalFaceTextureUrl));
             }
             
             Puts($"[DEBUG] Periodic texture redraw completed");
