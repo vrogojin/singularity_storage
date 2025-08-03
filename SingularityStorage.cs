@@ -11,7 +11,7 @@ using Oxide.Game.Rust.Cui;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "4.6.2")]
+    [Info("SingularityStorage", "YourServer", "4.7.5")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
@@ -145,6 +145,9 @@ namespace Oxide.Plugins
             LoadConfig();
             Puts($"[DEBUG] Config loaded - Terminal Skin ID: {config.TerminalSkinId}");
             
+            // Clean up any leftover UI from previous sessions
+            CleanupLeftoverUI();
+            
             // Load custom texture if enabled
             if (config.UseCustomFaceTexture && ImageLibrary != null)
             {
@@ -266,6 +269,23 @@ namespace Oxide.Plugins
             SaveData();
             
             Puts($"[DEBUG] Unloading plugin - cleaning up {activeTerminals.Count} terminals");
+            
+            // Clean up all player UIs before unloading
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                DestroyStorageTierUI(player);
+            }
+            playerStorageUI.Clear();
+            
+            // Clean up any active storage containers
+            foreach (var kvp in playerActiveStorage.ToList())
+            {
+                if (kvp.Value != null && !kvp.Value.IsDestroyed)
+                {
+                    kvp.Value.Kill();
+                }
+            }
+            playerActiveStorage.Clear();
             
             // Note: Individual timers will be automatically cleaned up when plugin unloads
             
@@ -1109,6 +1129,45 @@ namespace Oxide.Plugins
             }
         }
         
+        private int GetTierUpgradeCost(int currentTier)
+        {
+            switch (currentTier)
+            {
+                case 1: return 2000; // Tier 1 to 2
+                case 2: return 4000; // Tier 2 to 3
+                case 3: return 8000; // Tier 3 to 4
+                case 4: return 16000; // Tier 4 to 5
+                default: return -1; // Max tier or invalid
+            }
+        }
+        
+        private int GetPlayerInventoryScrap(BasePlayer player)
+        {
+            if (player == null) return 0;
+            
+            int totalScrap = 0;
+            
+            // Check main inventory
+            foreach (var item in player.inventory.containerMain.itemList)
+            {
+                if (item.info.shortname == "scrap")
+                {
+                    totalScrap += item.amount;
+                }
+            }
+            
+            // Check belt
+            foreach (var item in player.inventory.containerBelt.itemList)
+            {
+                if (item.info.shortname == "scrap")
+                {
+                    totalScrap += item.amount;
+                }
+            }
+            
+            return totalScrap;
+        }
+        
         private int GetCurrentScrapTotal(ulong playerId, ItemContainer container)
         {
             // When a container is open, the saved items have already been loaded into it
@@ -1423,6 +1482,22 @@ namespace Oxide.Plugins
             }
         }
         
+        private void OnPlayerConnected(BasePlayer player)
+        {
+            if (player == null) return;
+            
+            // Clean up any leftover UI for this player
+            // Use a small delay to ensure player is fully connected
+            timer.Once(1f, () =>
+            {
+                if (player != null && player.IsConnected)
+                {
+                    CuiHelper.DestroyUi(player, "SingularityStorageTierPanel");
+                    CuiHelper.DestroyUi(player, "SingularityStorageTierPanel_upgrade");
+                }
+            });
+        }
+        
         private void OnPlayerDisconnected(BasePlayer player, string reason)
         {
             if (playerActiveStorage.ContainsKey(player.userID))
@@ -1448,6 +1523,16 @@ namespace Oxide.Plugins
         #endregion
         
         #region Commands
+        
+        [ConsoleCommand("singularity.clearui")]
+        private void CmdClearUI(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null) return;
+            
+            DestroyStorageTierUI(player);
+            SendReply(player, "UI cleared.");
+        }
         
         [ChatCommand("singularity")]
         private void CmdCloud(BasePlayer player, string command, string[] args)
@@ -1536,6 +1621,130 @@ namespace Oxide.Plugins
                 default:
                     SendReply(player, "Unknown command. Use: /singularity info, terminals, or help");
                     break;
+            }
+        }
+        
+        [ConsoleCommand("singularity.upgrade")]
+        private void CmdUpgradeTier(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null) return;
+            
+            if (!permission.UserHasPermission(player.UserIDString, PERMISSION_USE))
+            {
+                SendReply(player, "You don't have permission to use singularity storage.");
+                return;
+            }
+            
+            var currentTier = GetPlayerStorageTier(player);
+            if (currentTier >= 5)
+            {
+                SendReply(player, "<color=#ff0000>You are already at the maximum tier!</color>");
+                return;
+            }
+            
+            var upgradeCost = GetTierUpgradeCost(currentTier);
+            var playerScrap = GetPlayerInventoryScrap(player);
+            
+            if (playerScrap < upgradeCost)
+            {
+                SendReply(player, $"<color=#ff0000>Insufficient scrap! You need {upgradeCost:N0} scrap to upgrade to Tier {currentTier + 1}. You have {playerScrap:N0}.</color>");
+                return;
+            }
+            
+            // Remove scrap from player inventory
+            int scrapToRemove = upgradeCost;
+            
+            // Remove from main inventory first
+            foreach (var item in player.inventory.containerMain.itemList.ToList())
+            {
+                if (item.info.shortname == "scrap" && scrapToRemove > 0)
+                {
+                    if (item.amount <= scrapToRemove)
+                    {
+                        scrapToRemove -= item.amount;
+                        item.Remove();
+                    }
+                    else
+                    {
+                        item.amount -= scrapToRemove;
+                        scrapToRemove = 0;
+                        item.MarkDirty();
+                    }
+                }
+            }
+            
+            // Remove from belt if needed
+            foreach (var item in player.inventory.containerBelt.itemList.ToList())
+            {
+                if (item.info.shortname == "scrap" && scrapToRemove > 0)
+                {
+                    if (item.amount <= scrapToRemove)
+                    {
+                        scrapToRemove -= item.amount;
+                        item.Remove();
+                    }
+                    else
+                    {
+                        item.amount -= scrapToRemove;
+                        scrapToRemove = 0;
+                        item.MarkDirty();
+                    }
+                }
+            }
+            
+            // Verify scrap was actually removed
+            if (scrapToRemove > 0)
+            {
+                SendReply(player, "<color=#ff0000>Error: Failed to remove scrap from inventory. Upgrade cancelled.</color>");
+                Puts($"[ERROR] Failed to remove {scrapToRemove} scrap from {player.displayName}'s inventory during upgrade");
+                return;
+            }
+            
+            // Grant the new tier permission
+            string newPermission = GetTierPermission(currentTier + 1);
+            if (!string.IsNullOrEmpty(newPermission))
+            {
+                permission.GrantUserPermission(player.UserIDString, newPermission, this);
+                
+                SendReply(player, $"<color=#00ff00>Congratulations! You have upgraded to Tier {currentTier + 1}!</color>");
+                
+                var newSlots = GetTierSlots(currentTier + 1);
+                var newScrapLimit = GetTierScrapLimit(currentTier + 1);
+                var scrapLimitText = newScrapLimit == -1 ? "Unlimited" : $"{newScrapLimit:N0}";
+                
+                SendReply(player, $"<color=#00ff00>New limits: {newSlots} slots, {scrapLimitText} scrap capacity</color>");
+                
+                // If storage is currently open, refresh it
+                if (playerActiveStorage.ContainsKey(player.userID))
+                {
+                    var storage = playerActiveStorage[player.userID] as StorageContainer;
+                    if (storage != null && !storage.IsDestroyed)
+                    {
+                        // Update storage capacity
+                        storage.inventory.capacity = newSlots;
+                        storage.SendNetworkUpdate();
+                        player.inventory.loot.SendImmediate();
+                    }
+                }
+                
+                // Refresh the UI to show the new tier
+                CreateStorageTierUI(player);
+                
+                // Log the upgrade
+                Puts($"[UPGRADE] {player.displayName} ({player.UserIDString}) upgraded from Tier {currentTier} to Tier {currentTier + 1}");
+            }
+        }
+        
+        private string GetTierPermission(int tier)
+        {
+            switch (tier)
+            {
+                case 2: return PERMISSION_TIER2;
+                case 3: return PERMISSION_TIER3;
+                case 4: return PERMISSION_TIER4;
+                case 5: return PERMISSION_TIER5;
+                default: return null;
             }
         }
         
@@ -2151,6 +2360,29 @@ namespace Oxide.Plugins
         
         #region UI Management
         
+        private void CleanupLeftoverUI()
+        {
+            // Clean up any leftover UI elements from previous plugin sessions
+            // This handles cases where the server crashed or plugin was improperly unloaded
+            int cleanedPlayers = 0;
+            
+            foreach (var player in BasePlayer.activePlayerList)
+            {
+                if (player == null || !player.IsConnected) continue;
+                
+                // Directly destroy known UI element names
+                // These are the hardcoded panel names we use
+                CuiHelper.DestroyUi(player, "SingularityStorageTierPanel");
+                CuiHelper.DestroyUi(player, "SingularityStorageTierPanel_upgrade");
+                cleanedPlayers++;
+            }
+            
+            if (cleanedPlayers > 0)
+            {
+                Puts($"[CLEANUP] Cleaned up leftover UI for {cleanedPlayers} players");
+            }
+        }
+        
         private void CreateStorageTierUI(BasePlayer player)
         {
             if (player == null || !player.IsConnected) return;
@@ -2189,8 +2421,8 @@ namespace Oxide.Plugins
                 },
                 RectTransform =
                 {
-                    AnchorMin = "0.35 0.88",
-                    AnchorMax = "0.65 0.98"
+                    AnchorMin = "0.35 0.72",
+                    AnchorMax = "0.65 0.82"
                 },
                 CursorEnabled = false
             }, "Overlay", panelName);
@@ -2292,6 +2524,81 @@ namespace Oxide.Plugins
                 }
             }, panelName);
             
+            // Add upgrade button if player can upgrade
+            if (tier < 5)
+            {
+                var upgradeCost = GetTierUpgradeCost(tier);
+                var playerScrap = GetPlayerInventoryScrap(player);
+                
+                if (playerScrap >= upgradeCost)
+                {
+                    // Add upgrade button panel
+                    elements.Add(new CuiPanel
+                    {
+                        Image =
+                        {
+                            Color = "0.2 0.8 0.2 0.9",
+                            Material = "assets/content/ui/uibackgroundblur-ingamemenu.mat"
+                        },
+                        RectTransform =
+                        {
+                            AnchorMin = "0.68 0.85",
+                            AnchorMax = "0.92 0.95"
+                        },
+                        CursorEnabled = true
+                    }, "Overlay", panelName + "_upgrade");
+                    
+                    // Add upgrade button
+                    elements.Add(new CuiButton
+                    {
+                        Button =
+                        {
+                            Command = $"singularity.upgrade",
+                            Color = "0 0 0 0"
+                        },
+                        RectTransform =
+                        {
+                            AnchorMin = "0 0",
+                            AnchorMax = "1 1"
+                        },
+                        Text =
+                        {
+                            Text = $"UPGRADE TO TIER {tier + 1}\nCost: {upgradeCost:N0} scrap",
+                            FontSize = 16,
+                            Align = TextAnchor.MiddleCenter,
+                            Color = "1 1 1 1"
+                        }
+                    }, panelName + "_upgrade");
+                    
+                    // Add glow effect border
+                    elements.Add(new CuiPanel
+                    {
+                        Image =
+                        {
+                            Color = "0.4 1 0.4 0.5"
+                        },
+                        RectTransform =
+                        {
+                            AnchorMin = "0 0",
+                            AnchorMax = "1 0.03"
+                        }
+                    }, panelName + "_upgrade");
+                    
+                    elements.Add(new CuiPanel
+                    {
+                        Image =
+                        {
+                            Color = "0.4 1 0.4 0.5"
+                        },
+                        RectTransform =
+                        {
+                            AnchorMin = "0 0.97",
+                            AnchorMax = "1 1"
+                        }
+                    }, panelName + "_upgrade");
+                }
+            }
+            
             CuiHelper.AddUi(player, elements);
             playerStorageUI[player.userID] = panelName;
         }
@@ -2302,7 +2609,10 @@ namespace Oxide.Plugins
             
             if (playerStorageUI.ContainsKey(player.userID))
             {
+                // Destroy main panel
                 CuiHelper.DestroyUi(player, playerStorageUI[player.userID]);
+                // Destroy upgrade button panel if it exists
+                CuiHelper.DestroyUi(player, playerStorageUI[player.userID] + "_upgrade");
                 playerStorageUI.Remove(player.userID);
             }
         }
