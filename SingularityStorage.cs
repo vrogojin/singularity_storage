@@ -1389,11 +1389,37 @@ namespace Oxide.Plugins
                     return false;
                 }
                 
+                // Update vending machine display with player's tier info
+                UpdateVendingDisplay(player, machine);
+                
                 OpenCloudStorage(player, activeTerminals[machine.net.ID.Value]);
                 return false;
             }
             
             return null;
+        }
+        
+        private void UpdateVendingDisplay(BasePlayer player, VendingMachine machine)
+        {
+            if (machine == null || player == null) return;
+            
+            var tier = GetPlayerStorageTier(player);
+            var playerData = GetPlayerStorage(player.userID);
+            var itemCount = playerData.Items.Count;
+            var maxSlots = GetTierSlots(tier);
+            var scrapCapacity = GetTierScrapLimit(tier);
+            var currentScrap = GetPlayerScrapInStorage(player.userID);
+            
+            // Update shop name with tier and usage info
+            machine.shopName = $"Singularity T{tier} [{itemCount}/{maxSlots}]";
+            
+            // Note: We can't modify sell orders on vending machines easily
+            // The shop name will show the important info
+            
+            // Don't broadcast on map
+            machine.SetFlag(BaseEntity.Flags.Reserved4, false);
+            
+            machine.SendNetworkUpdateImmediate();
         }
         
         private void OnLootEntityEnd(BasePlayer player, BaseEntity entity)
@@ -2723,14 +2749,22 @@ namespace Oxide.Plugins
             var currentScrap = GetPlayerScrapInStorage(player.userID);
             var playerData = GetPlayerStorage(player.userID);
             
-            // Build tier information text with wipe survival info
-            string wipeInfo = playerData.WipesSurvived > 0 
-                ? $" | {playerData.WipesSurvived} Wipes Survived" 
-                : "";
+            // Build tier information text with current tier wipe info
+            string wipeInfo = "";
+            if (tier > 1)
+            {
+                // Show current tier wipes and when downgrade will happen
+                if (playerData.CurrentTierWipes == 0)
+                    wipeInfo = " | Fresh Tier";
+                else if (playerData.CurrentTierWipes == 1)
+                    wipeInfo = " | 1 Wipe (Pay upkeep or downgrade next wipe!)";
+                else
+                    wipeInfo = $" | {playerData.CurrentTierWipes} Wipes at Tier {tier}";
+            }
             string tierText = $"Singularity Storage - Tier {tier}{wipeInfo}";
             
             string tierWipeInfo = playerData.CurrentTierWipes > 0
-                ? $" (Tier {tier} for {playerData.CurrentTierWipes} wipes)"
+                ? $" ({playerData.CurrentTierWipes} wipes at current tier)"
                 : " (New Tier)";
             
             string slotsText = scrapLimit == -1 
