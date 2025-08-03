@@ -7,10 +7,11 @@ using UnityEngine;
 using Newtonsoft.Json;
 using Rust;
 using System.Collections;
+using Oxide.Game.Rust.Cui;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "4.5.6")]
+    [Info("SingularityStorage", "YourServer", "4.6.2")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
@@ -21,6 +22,7 @@ namespace Oxide.Plugins
         private Dictionary<ulong, StorageTerminal> activeTerminals = new Dictionary<ulong, StorageTerminal>();
         private Dictionary<ulong, BaseEntity> playerActiveStorage = new Dictionary<ulong, BaseEntity>();
         private Dictionary<ulong, uint> terminalTextureIds = new Dictionary<ulong, uint>(); // Track correct texture IDs
+        private Dictionary<ulong, string> playerStorageUI = new Dictionary<ulong, string>(); // Track UI for each player
         
         private const string STORAGE_PREFAB = "assets/prefabs/deployable/large wood storage/box.wooden.large.prefab";
         private const string TERMINAL_PREFAB = "assets/prefabs/deployable/vendingmachine/vendingmachine.deployed.prefab";
@@ -891,8 +893,6 @@ namespace Oxide.Plugins
             storage.panelName = "generic_resizable";
             storage.isLootable = true;
             
-            // We'll use a different approach to show the tier in the UI
-            
             // Load saved items
             var playerData = GetPlayerStorage(player.userID);
             LoadItemsIntoContainer(storage, playerData);
@@ -914,9 +914,8 @@ namespace Oxide.Plugins
                     player.inventory.loot.SendImmediate();
                     player.ClientRPCPlayer(null, player, "RPC_OpenLootPanel", "generic_resizable");
                     
-                    // Send a message showing the tier
-                    var tier = GetPlayerStorageTier(player);
-                    SendReply(player, $"<color=#00ff00>Opened Singularity Storage Level {tier}</color>");
+                    // Create and show the tier info UI
+                    CreateStorageTierUI(player);
                     
                     // Listen for inventory changes
                     storage.inventory.onDirty += () => OnStorageChanged(player, storage);
@@ -932,6 +931,9 @@ namespace Oxide.Plugins
             // Force UI refresh
             player.inventory.loot.SendImmediate();
             storage.SendNetworkUpdate();
+            
+            // Update the tier UI to reflect current item count and scrap
+            CreateStorageTierUI(player);
         }
         
         private PlayerStorageData GetPlayerStorage(ulong playerId)
@@ -1405,6 +1407,9 @@ namespace Oxide.Plugins
                     SaveContainerToStorage(player, container);
                 }
                 
+                // Remove the UI
+                DestroyStorageTierUI(player);
+                
                 // Delay the kill to ensure save completes
                 timer.Once(0.1f, () =>
                 {
@@ -1432,6 +1437,10 @@ namespace Oxide.Plugins
                     }
                     storage.Kill();
                 }
+                
+                // Remove the UI
+                DestroyStorageTierUI(player);
+                
                 playerActiveStorage.Remove(player.userID);
             }
         }
@@ -2136,6 +2145,220 @@ namespace Oxide.Plugins
         protected override void LoadDefaultConfig()
         {
             config = new Configuration();
+        }
+        
+        #endregion
+        
+        #region UI Management
+        
+        private void CreateStorageTierUI(BasePlayer player)
+        {
+            if (player == null || !player.IsConnected) return;
+            
+            // Remove any existing UI first
+            DestroyStorageTierUI(player);
+            
+            var tier = GetPlayerStorageTier(player);
+            var slots = GetTierSlots(tier);
+            var scrapLimit = GetTierScrapLimit(tier);
+            var currentScrap = GetPlayerScrapInStorage(player.userID);
+            var playerData = GetPlayerStorage(player.userID);
+            
+            // Build tier information text
+            string tierText = $"Singularity Storage - Tier {tier}";
+            string slotsText = scrapLimit == -1 
+                ? "Scrap Capacity: Unlimited" 
+                : $"Scrap Capacity: {scrapLimit:N0}";
+            string scrapText = scrapLimit == -1 
+                ? "Scrap Storage: Unlimited" 
+                : $"Scrap Storage: {currentScrap:N0}/{scrapLimit:N0}";
+            
+            // Get tier restrictions info
+            string restrictionsText = GetTierRestrictionsText(tier);
+            
+            var elements = new CuiElementContainer();
+            string panelName = "SingularityStorageTierPanel";
+            
+            // Main panel background
+            elements.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = "0 0 0 0.85",
+                    Material = "assets/content/ui/uibackgroundblur-ingamemenu.mat"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0.35 0.88",
+                    AnchorMax = "0.65 0.98"
+                },
+                CursorEnabled = false
+            }, "Overlay", panelName);
+            
+            // Tier title
+            elements.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = tierText,
+                    FontSize = 22,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = GetTierColor(tier)
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0.65",
+                    AnchorMax = "1 1"
+                }
+            }, panelName);
+            
+            // Slots info
+            elements.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = slotsText,
+                    FontSize = 14,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "0.8 0.8 0.8 1"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0.35",
+                    AnchorMax = "1 0.65"
+                }
+            }, panelName);
+            
+            // Scrap limit info
+            elements.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = scrapText,
+                    FontSize = 14,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = currentScrap >= scrapLimit && scrapLimit != -1 ? "1 0.3 0.3 1" : "0.8 0.8 0.8 1"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0.15",
+                    AnchorMax = "1 0.35"
+                }
+            }, panelName);
+            
+            // Restrictions text
+            elements.Add(new CuiLabel
+            {
+                Text =
+                {
+                    Text = restrictionsText,
+                    FontSize = 12,
+                    Align = TextAnchor.MiddleCenter,
+                    Color = "0.7 0.7 0.7 1"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0",
+                    AnchorMax = "1 0.15"
+                }
+            }, panelName);
+            
+            // Add decorative border
+            elements.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = GetTierColor(tier),
+                    Material = "assets/content/ui/uibackgroundblur-ingamemenu.mat"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0",
+                    AnchorMax = "1 0.02"
+                }
+            }, panelName);
+            
+            elements.Add(new CuiPanel
+            {
+                Image =
+                {
+                    Color = GetTierColor(tier),
+                    Material = "assets/content/ui/uibackgroundblur-ingamemenu.mat"
+                },
+                RectTransform =
+                {
+                    AnchorMin = "0 0.98",
+                    AnchorMax = "1 1"
+                }
+            }, panelName);
+            
+            CuiHelper.AddUi(player, elements);
+            playerStorageUI[player.userID] = panelName;
+        }
+        
+        private void DestroyStorageTierUI(BasePlayer player)
+        {
+            if (player == null) return;
+            
+            if (playerStorageUI.ContainsKey(player.userID))
+            {
+                CuiHelper.DestroyUi(player, playerStorageUI[player.userID]);
+                playerStorageUI.Remove(player.userID);
+            }
+        }
+        
+        private string GetTierColor(int tier)
+        {
+            switch (tier)
+            {
+                case 1: return "0.6 0.6 0.6 1"; // Gray
+                case 2: return "0.3 0.8 0.3 1"; // Green
+                case 3: return "0.3 0.5 0.9 1"; // Blue
+                case 4: return "0.7 0.3 0.9 1"; // Purple
+                case 5: return "0.9 0.7 0.2 1"; // Gold
+                default: return "0.6 0.6 0.6 1";
+            }
+        }
+        
+        private string GetTierLimitsText(int tier)
+        {
+            var scrapLimit = GetTierScrapLimit(tier);
+            var slots = GetTierSlots(tier);
+            
+            if (scrapLimit == -1)
+            {
+                return $"{slots} slots, Unlimited scrap";
+            }
+            else
+            {
+                return $"{slots} slots, {scrapLimit:N0} scrap max";
+            }
+        }
+        
+        private string GetTierRestrictionsText(int tier)
+        {
+            var restrictions = new List<string>();
+            
+            // Add slot capacity info
+            var slots = GetTierSlots(tier);
+            restrictions.Add($"{slots} Storage Slots");
+            
+            if (config.OnlyAllowResourcesAndComponents)
+            {
+                restrictions.Add("Resources & Components Only");
+            }
+            
+            if (!config.AllowBlacklistedItems && config.BlacklistedItems.Count > 0)
+            {
+                restrictions.Add("No Explosives");
+            }
+            
+            if (tier < 5)
+            {
+                restrictions.Add($"Upgrade to Tier {tier + 1}");
+            }
+            
+            return string.Join(" | ", restrictions);
         }
         
         #endregion
