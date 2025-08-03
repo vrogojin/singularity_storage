@@ -11,7 +11,7 @@ using Oxide.Game.Rust.Cui;
 
 namespace Oxide.Plugins
 {
-    [Info("SingularityStorage", "YourServer", "4.7.5")]
+    [Info("SingularityStorage", "YourServer", "5.0.1")]
     [Description("Advanced quantum storage system that transcends server wipes")]
     public class SingularityStorage : RustPlugin
     {
@@ -90,6 +90,89 @@ namespace Oxide.Plugins
         
         #endregion
         
+        #region Wipe Detection
+        
+        private void CheckForWipeAndUpdateCounters()
+        {
+            // Get current save name to detect wipes
+            var currentSaveName = World.SaveFileName;
+            
+            // Use a wrapper class for storing the save name
+            var saveData = Interface.Oxide.DataFileSystem.ReadObject<SaveNameData>("SingularityStorage_LastSave");
+            var lastKnownSave = saveData?.SaveName ?? "";
+            
+            bool isNewWipe = false;
+            bool isFirstRun = string.IsNullOrEmpty(lastKnownSave); // First time plugin has run
+            
+            // Check if it's a new save (wipe detected) - but not on first run
+            if (!string.IsNullOrEmpty(currentSaveName) && currentSaveName != lastKnownSave)
+            {
+                if (!isFirstRun)
+                {
+                    isNewWipe = true;
+                    Puts($"[WIPE DETECTED] New save detected: {currentSaveName} (previous: {lastKnownSave})");
+                }
+                else
+                {
+                    Puts($"[FIRST RUN] Initial save name stored: {currentSaveName}");
+                }
+                
+                // Save the new save name
+                Interface.Oxide.DataFileSystem.WriteObject("SingularityStorage_LastSave", new SaveNameData { SaveName = currentSaveName });
+            }
+            
+            // Alternative wipe detection: Check if player count is very low and buildings are gone
+            // This catches manual wipes that keep the same save name
+            var timeSinceLastCheck = DateTime.UtcNow;
+            
+            if (isNewWipe)
+            {
+                // Update wipe counters for all stored player data
+                foreach (var playerData in playerStorage.Values)
+                {
+                    // Only count as a wipe if it's been at least 12 hours since last wipe
+                    // This prevents false positives from server restarts
+                    if (playerData.LastWipeDate == DateTime.MinValue || 
+                        (timeSinceLastCheck - playerData.LastWipeDate).TotalHours > 12)
+                    {
+                        playerData.WipesSurvived++;
+                        playerData.CurrentTierWipes++;
+                        playerData.LastWipeDate = timeSinceLastCheck;
+                        
+                        // Check if tier needs to be downgraded (after 2 wipes at current tier)
+                        if (playerData.CurrentTierWipes >= 2 && playerData.StorageTier > 1)
+                        {
+                            // Downgrade tier
+                            var oldTier = playerData.StorageTier;
+                            playerData.StorageTier = 1;
+                            playerData.CurrentTierWipes = 0;
+                            
+                            // Revoke higher tier permissions for this player
+                            var playerId = playerData.PlayerId.ToString();
+                            permission.RevokeUserPermission(playerId, PERMISSION_TIER2);
+                            permission.RevokeUserPermission(playerId, PERMISSION_TIER3);
+                            permission.RevokeUserPermission(playerId, PERMISSION_TIER4);
+                            permission.RevokeUserPermission(playerId, PERMISSION_TIER5);
+                            
+                            Puts($"[TIER DOWNGRADE] Player {playerData.PlayerId} downgraded from Tier {oldTier} to Tier 1 (exceeded 2 wipes without upkeep)");
+                        }
+                        else
+                        {
+                            Puts($"[WIPE] Player {playerData.PlayerId} has survived {playerData.WipesSurvived} wipes total, {playerData.CurrentTierWipes} at current tier");
+                        }
+                    }
+                }
+                
+                // Save the updated data
+                SaveData();
+                
+                // Announce wipe survival in console
+                Puts($"[SINGULARITY STORAGE] Wipe detected! {playerStorage.Count} players' storage survived the wipe.");
+            }
+        }
+        
+        #endregion
+        
         #region Data
         
         private class PlayerStorageData
@@ -98,6 +181,11 @@ namespace Oxide.Plugins
             public List<ItemData> Items { get; set; } = new List<ItemData>();
             public DateTime LastAccessed { get; set; }
             public int StorageTier { get; set; } = 1; // Default tier 1
+            public int WipesSurvived { get; set; } = 0; // How many wipes this storage has survived
+            public DateTime FirstCreated { get; set; } = DateTime.UtcNow; // When the storage was first created
+            public DateTime LastWipeDate { get; set; } = DateTime.MinValue; // Last wipe date tracked
+            public int CurrentTierWipes { get; set; } = 0; // Wipes survived at current tier
+            public DateTime TierUpgradeDate { get; set; } = DateTime.UtcNow; // When tier was last upgraded
         }
         
         private class ItemData
@@ -124,6 +212,11 @@ namespace Oxide.Plugins
             public BaseEntity DisplayEntity { get; set; }
         }
         
+        private class SaveNameData
+        {
+            public string SaveName { get; set; }
+        }
+        
         #endregion
         
         #region Oxide Hooks
@@ -144,6 +237,9 @@ namespace Oxide.Plugins
         {
             LoadConfig();
             Puts($"[DEBUG] Config loaded - Terminal Skin ID: {config.TerminalSkinId}");
+            
+            // Check for wipe and update counters
+            CheckForWipeAndUpdateCounters();
             
             // Clean up any leftover UI from previous sessions
             CleanupLeftoverUI();
@@ -964,7 +1060,13 @@ namespace Oxide.Plugins
                 {
                     PlayerId = playerId,
                     Items = new List<ItemData>(),
-                    LastAccessed = DateTime.UtcNow
+                    LastAccessed = DateTime.UtcNow,
+                    StorageTier = 1,
+                    WipesSurvived = 0,
+                    FirstCreated = DateTime.UtcNow,
+                    LastWipeDate = DateTime.MinValue,
+                    CurrentTierWipes = 0,  // Ensure this starts at 0
+                    TierUpgradeDate = DateTime.UtcNow
                 };
             }
             
@@ -1138,6 +1240,18 @@ namespace Oxide.Plugins
                 case 3: return 8000; // Tier 3 to 4
                 case 4: return 16000; // Tier 4 to 5
                 default: return -1; // Max tier or invalid
+            }
+        }
+        
+        private int GetTierUpkeepCost(int tier)
+        {
+            switch (tier)
+            {
+                case 2: return 2000; // Keep tier 2
+                case 3: return 6000; // Keep tier 3 (2000 + 4000)
+                case 4: return 14000; // Keep tier 4 (2000 + 4000 + 8000)
+                case 5: return 30000; // Keep tier 5 (2000 + 4000 + 8000 + 16000)
+                default: return 0; // Tier 1 has no upkeep
             }
         }
         
@@ -1494,6 +1608,30 @@ namespace Oxide.Plugins
                 {
                     CuiHelper.DestroyUi(player, "SingularityStorageTierPanel");
                     CuiHelper.DestroyUi(player, "SingularityStorageTierPanel_upgrade");
+                    CuiHelper.DestroyUi(player, "SingularityStorageTierPanel_warning");
+                    CuiHelper.DestroyUi(player, "SingularityStorageTierPanel_upkeep");
+                }
+            });
+            
+            // Check if player needs to pay upkeep and notify them
+            timer.Once(5f, () =>
+            {
+                if (player != null && player.IsConnected && permission.UserHasPermission(player.UserIDString, PERMISSION_USE))
+                {
+                    var tier = GetPlayerStorageTier(player);
+                    if (tier > 1)
+                    {
+                        var playerData = GetPlayerStorage(player.userID);
+                        if (playerData.CurrentTierWipes >= 1)
+                        {
+                            var upkeepCost = GetTierUpkeepCost(tier);
+                            SendReply(player, $"<color=#ff0000>⚠️ SINGULARITY STORAGE UPKEEP WARNING!</color>");
+                            SendReply(player, $"<color=#ffff00>Your Tier {tier} storage needs upkeep payment!</color>");
+                            SendReply(player, $"<color=#ffff00>Cost: {upkeepCost:N0} scrap</color>");
+                            SendReply(player, $"<color=#ff0000>If not paid, you will be downgraded to Tier 1 next wipe!</color>");
+                            SendReply(player, "Access any Singularity Terminal to pay upkeep.");
+                        }
+                    }
                 }
             });
         }
@@ -1524,6 +1662,99 @@ namespace Oxide.Plugins
         
         #region Commands
         
+        [ConsoleCommand("singularity.upkeep")]
+        private void CmdPayUpkeep(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null) return;
+            
+            var currentTier = GetPlayerStorageTier(player);
+            if (currentTier <= 1)
+            {
+                SendReply(player, "<color=#ff0000>Tier 1 doesn't require upkeep!</color>");
+                return;
+            }
+            
+            var playerData = GetPlayerStorage(player.userID);
+            if (playerData.CurrentTierWipes < 1)
+            {
+                SendReply(player, "<color=#ff0000>Upkeep is not due yet!</color>");
+                return;
+            }
+            
+            var upkeepCost = GetTierUpkeepCost(currentTier);
+            var playerScrap = GetPlayerInventoryScrap(player);
+            
+            if (playerScrap < upkeepCost)
+            {
+                SendReply(player, $"<color=#ff0000>Insufficient scrap! You need {upkeepCost:N0} scrap to pay upkeep for Tier {currentTier}. You have {playerScrap:N0}.</color>");
+                return;
+            }
+            
+            // Remove scrap from player inventory
+            int scrapToRemove = upkeepCost;
+            
+            // Remove from main inventory first
+            foreach (var item in player.inventory.containerMain.itemList.ToList())
+            {
+                if (item.info.shortname == "scrap" && scrapToRemove > 0)
+                {
+                    if (item.amount <= scrapToRemove)
+                    {
+                        scrapToRemove -= item.amount;
+                        item.Remove();
+                    }
+                    else
+                    {
+                        item.amount -= scrapToRemove;
+                        scrapToRemove = 0;
+                        item.MarkDirty();
+                    }
+                }
+            }
+            
+            // Remove from belt if needed
+            foreach (var item in player.inventory.containerBelt.itemList.ToList())
+            {
+                if (item.info.shortname == "scrap" && scrapToRemove > 0)
+                {
+                    if (item.amount <= scrapToRemove)
+                    {
+                        scrapToRemove -= item.amount;
+                        item.Remove();
+                    }
+                    else
+                    {
+                        item.amount -= scrapToRemove;
+                        scrapToRemove = 0;
+                        item.MarkDirty();
+                    }
+                }
+            }
+            
+            // Verify scrap was actually removed
+            if (scrapToRemove > 0)
+            {
+                SendReply(player, "<color=#ff0000>Error: Failed to remove scrap from inventory. Upkeep payment cancelled.</color>");
+                Puts($"[ERROR] Failed to remove {scrapToRemove} scrap from {player.displayName}'s inventory during upkeep payment");
+                return;
+            }
+            
+            // Reset the tier wipe counter
+            playerData.CurrentTierWipes = 0;
+            playerData.TierUpgradeDate = DateTime.UtcNow;
+            SaveData();
+            
+            SendReply(player, $"<color=#00ff00>Upkeep paid! Your Tier {currentTier} status is secured for another wipe.</color>");
+            SendReply(player, $"<color=#00ff00>You spent {upkeepCost:N0} scrap to maintain your tier.</color>");
+            
+            // Refresh the UI
+            CreateStorageTierUI(player);
+            
+            // Log the upkeep payment
+            Puts($"[UPKEEP] {player.displayName} ({player.UserIDString}) paid {upkeepCost} scrap to maintain Tier {currentTier}");
+        }
+        
         [ConsoleCommand("singularity.clearui")]
         private void CmdClearUI(ConsoleSystem.Arg arg)
         {
@@ -1532,6 +1763,160 @@ namespace Oxide.Plugins
             
             DestroyStorageTierUI(player);
             SendReply(player, "UI cleared.");
+        }
+        
+        [ConsoleCommand("singularity.forcerefreshui")]
+        private void CmdForceRefreshUI(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null) return;
+            
+            DestroyStorageTierUI(player);
+            if (playerActiveStorage.ContainsKey(player.userID))
+            {
+                CreateStorageTierUI(player);
+                SendReply(player, "<color=#00ff00>UI refreshed</color>");
+            }
+            else
+            {
+                SendReply(player, "<color=#ffaa00>You need to open a storage terminal first</color>");
+            }
+        }
+        
+        [ConsoleCommand("singularity.setwipecounter")]
+        private void CmdSetWipeCounter(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            
+            // Allow RCON/Console execution
+            if (player == null && (arg.IsRcon || arg.IsServerside))
+            {
+                if (arg.Args == null || arg.Args.Length < 2)
+                {
+                    Puts("Usage from console: singularity.setwipecounter <steamid> <value>");
+                    return;
+                }
+                
+                if (!ulong.TryParse(arg.Args[0], out ulong steamId))
+                {
+                    Puts("Invalid steam ID");
+                    return;
+                }
+                
+                if (!int.TryParse(arg.Args[1], out int consoleValue))
+                {
+                    Puts("Invalid value. Must be a number.");
+                    return;
+                }
+                
+                var consoleData = GetPlayerStorage(steamId);
+                var oldConsoleValue = consoleData.CurrentTierWipes;
+                Puts($"[RCON/Console] Setting wipe counter from {oldConsoleValue} to {consoleValue} for player {steamId}");
+                consoleData.CurrentTierWipes = consoleValue;
+                SaveData();
+                Puts($"[RCON/Console] After SaveData, counter is: {consoleData.CurrentTierWipes}");
+                
+                // Force reload and verify
+                LoadData();
+                var verifyConsoleData = GetPlayerStorage(steamId);
+                Puts($"[RCON/Console] After reload from disk, counter is: {verifyConsoleData.CurrentTierWipes}");
+                return;
+            }
+            
+            if (player == null) return;
+            
+            if (!permission.UserHasPermission(player.UserIDString, PERMISSION_ADMIN))
+            {
+                SendReply(player, "You need admin permission to use this command.");
+                return;
+            }
+            
+            if (arg.Args == null || arg.Args.Length < 1)
+            {
+                SendReply(player, "Usage: singularity.setwipecounter <value>");
+                return;
+            }
+            
+            if (!int.TryParse(arg.Args[0], out int value))
+            {
+                SendReply(player, "Invalid value. Must be a number.");
+                return;
+            }
+            
+            var playerData = GetPlayerStorage(player.userID);
+            var oldValue = playerData.CurrentTierWipes;
+            Puts($"[DEBUG] Setting wipe counter from {oldValue} to {value} for player {player.displayName}");
+            playerData.CurrentTierWipes = value;
+            SaveData();
+            Puts($"[DEBUG] After setting, counter is now: {playerData.CurrentTierWipes}");
+            
+            // Force reload from disk to verify it saved
+            LoadData();
+            var verifyData = GetPlayerStorage(player.userID);
+            Puts($"[DEBUG] After reload from disk, counter is: {verifyData.CurrentTierWipes}");
+            
+            SendReply(player, $"<color=#00ff00>Wipe counter set to {value} (was {oldValue}, verified as {verifyData.CurrentTierWipes})</color>");
+            
+            // Refresh UI if storage is open
+            if (playerActiveStorage.ContainsKey(player.userID))
+            {
+                DestroyStorageTierUI(player);
+                CreateStorageTierUI(player);
+            }
+        }
+        
+        [ConsoleCommand("singularity.reloaddata")]
+        private void CmdReloadData(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null) return;
+            
+            if (!permission.UserHasPermission(player.UserIDString, PERMISSION_ADMIN))
+            {
+                SendReply(player, "You need admin permission to use this command.");
+                return;
+            }
+            
+            LoadData();
+            var playerData = GetPlayerStorage(player.userID);
+            SendReply(player, $"<color=#00ff00>Data reloaded from disk. Your counter: {playerData.CurrentTierWipes}</color>");
+        }
+        
+        [ConsoleCommand("singularity.forceresetallcounters")]
+        private void CmdForceResetAllCounters(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null) return;
+            
+            if (!permission.UserHasPermission(player.UserIDString, PERMISSION_ADMIN))
+            {
+                SendReply(player, "You need admin permission to use this command.");
+                return;
+            }
+            
+            // Force reset ALL counters to 0
+            foreach (var kvp in playerStorage)
+            {
+                kvp.Value.CurrentTierWipes = 0;
+                kvp.Value.TierUpgradeDate = DateTime.UtcNow;
+            }
+            
+            // Save multiple times to ensure it persists
+            SaveData();
+            SaveData();
+            
+            // Verify
+            LoadData();
+            var checkData = GetPlayerStorage(player.userID);
+            
+            SendReply(player, $"<color=#00ff00>FORCE RESET: All counters set to 0. Your counter after reload: {checkData.CurrentTierWipes}</color>");
+            
+            // Refresh UI
+            if (playerActiveStorage.ContainsKey(player.userID))
+            {
+                DestroyStorageTierUI(player);
+                CreateStorageTierUI(player);
+            }
         }
         
         [ChatCommand("singularity")]
@@ -1565,6 +1950,16 @@ namespace Oxide.Plugins
                     SendReply(player, $"Quantum items stored: {storage.Items.Count}/{slots}");
                     SendReply(player, $"Last quantum sync: {storage.LastAccessed:yyyy-MM-dd HH:mm} UTC");
                     SendReply(player, $"Storage capacity: {(storage.Items.Count * 100.0 / slots):F1}%");
+                    
+                    // Show wipe survival stats
+                    SendReply(player, $"<color=#ffff00>Wipe Survival Stats:</color>");
+                    SendReply(player, $"Total wipes survived: {storage.WipesSurvived}");
+                    SendReply(player, $"Wipes at current tier: {storage.CurrentTierWipes}");
+                    if (storage.FirstCreated != DateTime.MinValue)
+                    {
+                        var daysSinceCreation = (DateTime.UtcNow - storage.FirstCreated).TotalDays;
+                        SendReply(player, $"Storage age: {daysSinceCreation:F0} days");
+                    }
                     
                     // Show scrap limit info
                     var scrapLimit = GetTierScrapLimit(tier);
@@ -1707,6 +2102,12 @@ namespace Oxide.Plugins
             {
                 permission.GrantUserPermission(player.UserIDString, newPermission, this);
                 
+                // Update tier tracking data
+                var playerData = GetPlayerStorage(player.userID);
+                playerData.CurrentTierWipes = 0; // Reset tier-specific wipe counter
+                playerData.TierUpgradeDate = DateTime.UtcNow;
+                SaveData();
+                
                 SendReply(player, $"<color=#00ff00>Congratulations! You have upgraded to Tier {currentTier + 1}!</color>");
                 
                 var newSlots = GetTierSlots(currentTier + 1);
@@ -1746,6 +2147,76 @@ namespace Oxide.Plugins
                 case 5: return PERMISSION_TIER5;
                 default: return null;
             }
+        }
+        
+        [ConsoleCommand("singularity.resetwipecounter")]
+        private void CmdResetWipeCounter(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null)
+            {
+                // Allow server console to reset all counters
+                if (arg.IsServerside || arg.IsRcon)
+                {
+                    foreach (var data in playerStorage.Values)
+                    {
+                        data.CurrentTierWipes = 0;
+                        data.TierUpgradeDate = DateTime.UtcNow;
+                    }
+                    SaveData();
+                    Puts("Reset all player wipe counters to 0");
+                }
+                return;
+            }
+            
+            if (!permission.UserHasPermission(player.UserIDString, PERMISSION_ADMIN))
+            {
+                SendReply(player, "You need admin permission to use this command.");
+                return;
+            }
+            
+            var playerData = GetPlayerStorage(player.userID);
+            playerData.CurrentTierWipes = 0;
+            playerData.TierUpgradeDate = DateTime.UtcNow;
+            SaveData();
+            
+            SendReply(player, $"<color=#00ff00>Your tier wipe counter has been reset to 0.</color>");
+            
+            // Refresh UI if storage is open
+            if (playerActiveStorage.ContainsKey(player.userID))
+            {
+                DestroyStorageTierUI(player);
+                CreateStorageTierUI(player);
+            }
+        }
+        
+        [ConsoleCommand("singularity.checkwipestatus")]
+        private void CmdCheckWipeStatus(ConsoleSystem.Arg arg)
+        {
+            var player = arg.Player();
+            if (player == null) return;
+            
+            if (!permission.UserHasPermission(player.UserIDString, PERMISSION_ADMIN))
+            {
+                SendReply(player, "You need admin permission to use this command.");
+                return;
+            }
+            
+            var playerData = GetPlayerStorage(player.userID);
+            SendReply(player, $"<color=#ffff00>Wipe Status for {player.displayName}:</color>");
+            SendReply(player, $"Current Tier: {playerData.StorageTier}");
+            SendReply(player, $"Wipes at current tier: {playerData.CurrentTierWipes}");
+            SendReply(player, $"Total wipes survived: {playerData.WipesSurvived}");
+            SendReply(player, $"Last wipe date: {playerData.LastWipeDate}");
+            SendReply(player, $"Tier upgrade date: {playerData.TierUpgradeDate}");
+            SendReply(player, $"Will show warning: {(playerData.CurrentTierWipes > 0 ? "Yes" : "No")}");
+            SendReply(player, $"Will downgrade on next wipe: {(playerData.CurrentTierWipes >= 1 ? "Yes" : "No")}");
+            SendReply(player, $"<color=#ffaa00>Debug: Counter == {playerData.CurrentTierWipes}, > 0? {playerData.CurrentTierWipes > 0}</color>");
+            
+            // Check save file status
+            var saveData = Interface.Oxide.DataFileSystem.ReadObject<SaveNameData>("SingularityStorage_LastSave");
+            SendReply(player, $"Current save: {World.SaveFileName}");
+            SendReply(player, $"Last known save: {saveData?.SaveName ?? "(none)"}");
         }
         
         [ChatCommand("singularityadmin")]
@@ -2309,6 +2780,28 @@ namespace Oxide.Plugins
             try
             {
                 playerStorage = Interface.Oxide.DataFileSystem.ReadObject<Dictionary<ulong, PlayerStorageData>>("SingularityStorage_Data") ?? new Dictionary<ulong, PlayerStorageData>();
+                
+                // Migrate existing data - initialize new fields for old data
+                foreach (var kvp in playerStorage)
+                {
+                    var data = kvp.Value;
+                    
+                    // Initialize FirstCreated if it's default
+                    if (data.FirstCreated == DateTime.MinValue || data.FirstCreated == default(DateTime))
+                    {
+                        data.FirstCreated = DateTime.UtcNow;
+                    }
+                    
+                    // Initialize TierUpgradeDate if it's default
+                    if (data.TierUpgradeDate == DateTime.MinValue || data.TierUpgradeDate == default(DateTime))
+                    {
+                        data.TierUpgradeDate = DateTime.UtcNow;
+                    }
+                    
+                    // CurrentTierWipes should start at 0 for existing players
+                    // It will only increment when a wipe is detected
+                    // No need to change it here as it defaults to 0
+                }
             }
             catch (Exception ex)
             {
@@ -2321,7 +2814,14 @@ namespace Oxide.Plugins
         {
             try
             {
+                Puts($"[DEBUG SaveData] Saving data for {playerStorage.Count} players");
+                foreach (var kvp in playerStorage.Take(3)) // Show first 3 for debugging
+                {
+                    Puts($"[DEBUG SaveData] Player {kvp.Key}: CurrentTierWipes={kvp.Value.CurrentTierWipes}, Tier={kvp.Value.StorageTier}");
+                }
+                
                 Interface.Oxide.DataFileSystem.WriteObject("SingularityStorage_Data", playerStorage);
+                Puts($"[DEBUG SaveData] Data saved successfully");
             }
             catch (Exception ex)
             {
@@ -2396,11 +2896,19 @@ namespace Oxide.Plugins
             var currentScrap = GetPlayerScrapInStorage(player.userID);
             var playerData = GetPlayerStorage(player.userID);
             
-            // Build tier information text
-            string tierText = $"Singularity Storage - Tier {tier}";
+            // Build tier information text with wipe survival info
+            string wipeInfo = playerData.WipesSurvived > 0 
+                ? $" | {playerData.WipesSurvived} Wipes Survived" 
+                : "";
+            string tierText = $"Singularity Storage - Tier {tier}{wipeInfo}";
+            
+            string tierWipeInfo = playerData.CurrentTierWipes > 0
+                ? $" (Tier {tier} for {playerData.CurrentTierWipes} wipes)"
+                : " (New Tier)";
+            
             string slotsText = scrapLimit == -1 
-                ? "Scrap Capacity: Unlimited" 
-                : $"Scrap Capacity: {scrapLimit:N0}";
+                ? $"Scrap Capacity: Unlimited{tierWipeInfo}" 
+                : $"Scrap Capacity: {scrapLimit:N0}{tierWipeInfo}";
             string scrapText = scrapLimit == -1 
                 ? "Scrap Storage: Unlimited" 
                 : $"Scrap Storage: {currentScrap:N0}/{scrapLimit:N0}";
@@ -2599,6 +3107,92 @@ namespace Oxide.Plugins
                 }
             }
             
+            // Add upkeep button or warning if needed
+            // Only show warning if we've actually survived at least 1 wipe at this tier
+            Puts($"[DEBUG UI] Player {player.displayName}: Tier={tier}, CurrentTierWipes={playerData.CurrentTierWipes}, Showing warning? {tier > 1 && playerData.CurrentTierWipes >= 1}");
+            
+            // Show warning after 1 wipe (counter >= 1)
+            if (tier > 1 && playerData.CurrentTierWipes >= 1)
+            {
+                var upkeepCost = GetTierUpkeepCost(tier);
+                var playerScrap = GetPlayerInventoryScrap(player);
+                
+                Puts($"[DEBUG UI] SHOWING WARNING for {player.displayName} - Counter is {playerData.CurrentTierWipes}");
+                
+                // Show warning panel
+                elements.Add(new CuiPanel
+                {
+                    Image =
+                    {
+                        Color = playerData.CurrentTierWipes >= 1 ? "0.8 0.2 0.2 0.9" : "0.8 0.8 0.2 0.9",
+                        Material = "assets/content/ui/uibackgroundblur-ingamemenu.mat"
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0.08 0.85",
+                        AnchorMax = "0.32 0.95"
+                    },
+                    CursorEnabled = false
+                }, "Overlay", panelName + "_warning");
+                
+                // Warning text
+                elements.Add(new CuiLabel
+                {
+                    Text =
+                    {
+                        Text = "⚠️ TIER UPKEEP DUE!\nWill downgrade next wipe!",
+                        FontSize = 12,
+                        Align = TextAnchor.MiddleCenter,
+                        Color = "1 1 1 1"
+                    },
+                    RectTransform =
+                    {
+                        AnchorMin = "0 0",
+                        AnchorMax = "1 1"
+                    }
+                }, panelName + "_warning");
+                
+                // Add upkeep payment button if player has enough scrap
+                if (playerScrap >= upkeepCost)
+                {
+                    elements.Add(new CuiPanel
+                    {
+                        Image =
+                        {
+                            Color = "0.8 0.6 0.2 0.9",
+                            Material = "assets/content/ui/uibackgroundblur-ingamemenu.mat"
+                        },
+                        RectTransform =
+                        {
+                            AnchorMin = "0.35 0.85",
+                            AnchorMax = "0.65 0.95"
+                        },
+                        CursorEnabled = true
+                    }, "Overlay", panelName + "_upkeep");
+                    
+                    elements.Add(new CuiButton
+                    {
+                        Button =
+                        {
+                            Command = "singularity.upkeep",
+                            Color = "0 0 0 0"
+                        },
+                        RectTransform =
+                        {
+                            AnchorMin = "0 0",
+                            AnchorMax = "1 1"
+                        },
+                        Text =
+                        {
+                            Text = $"PAY UPKEEP\n{upkeepCost:N0} scrap",
+                            FontSize = 14,
+                            Align = TextAnchor.MiddleCenter,
+                            Color = "1 1 1 1"
+                        }
+                    }, panelName + "_upkeep");
+                }
+            }
+            
             CuiHelper.AddUi(player, elements);
             playerStorageUI[player.userID] = panelName;
         }
@@ -2613,6 +3207,10 @@ namespace Oxide.Plugins
                 CuiHelper.DestroyUi(player, playerStorageUI[player.userID]);
                 // Destroy upgrade button panel if it exists
                 CuiHelper.DestroyUi(player, playerStorageUI[player.userID] + "_upgrade");
+                // Destroy warning panel if it exists
+                CuiHelper.DestroyUi(player, playerStorageUI[player.userID] + "_warning");
+                // Destroy upkeep button panel if it exists
+                CuiHelper.DestroyUi(player, playerStorageUI[player.userID] + "_upkeep");
                 playerStorageUI.Remove(player.userID);
             }
         }
