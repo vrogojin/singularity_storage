@@ -545,13 +545,32 @@ namespace Oxide.Plugins
             {
                 vendingMachine.shopName = config.TerminalDisplayName;
                 
+                // Add a fake sell order to display an item on the screen
+                vendingMachine.sellOrders.sellOrders.Clear();
+                var displayOrder = new ProtoBuf.VendingMachine.SellOrder
+                {
+                    itemToSellID = -1247485104, // Command Block
+                    itemToSellAmount = 1,
+                    currencyID = -932201673, // Scrap
+                    currencyAmountPerItem = 999999,
+                    inStock = 1,
+                    itemToSellIsBP = false,
+                    currencyIsBP = false
+                };
+                vendingMachine.sellOrders.sellOrders.Add(displayOrder);
+                
                 // Make the terminal non-modifiable
                 entity.SetFlag(BaseEntity.Flags.Reserved8, true); // This flag often prevents rotation
                 vendingMachine.skinID = config.TerminalSkinId;
                 Puts($"[DEBUG] Post-spawn - Setting skinID to: {config.TerminalSkinId}");
                 vendingMachine.SetFlag(BaseEntity.Flags.Reserved1, true);
+                
+                // Don't broadcast on map
+                vendingMachine.SetFlag(BaseEntity.Flags.Reserved4, false);
+                
                 vendingMachine.SendNetworkUpdateImmediate();
                 Puts($"[DEBUG] Final skinID after network update: {vendingMachine.skinID}");
+                Puts($"[DEBUG] Added sell order to display Command Block on screen");
             }
             
             var terminal = new StorageTerminal
@@ -1413,8 +1432,21 @@ namespace Oxide.Plugins
             // Update shop name with tier and usage info
             machine.shopName = $"Singularity T{tier} [{itemCount}/{maxSlots}]";
             
-            // Note: We can't modify sell orders on vending machines easily
-            // The shop name will show the important info
+            // Display command block on the vending machine screen
+            machine.sellOrders.sellOrders.Clear();
+            
+            var displayOrder = new ProtoBuf.VendingMachine.SellOrder
+            {
+                itemToSellID = -1247485104, // Command Block
+                itemToSellAmount = 1,
+                currencyID = -932201673, // Scrap as currency
+                currencyAmountPerItem = 999999, // High price so nobody tries to buy
+                inStock = 1,
+                itemToSellIsBP = false,
+                currencyIsBP = false
+            };
+            
+            machine.sellOrders.sellOrders.Add(displayOrder);
             
             // Don't broadcast on map
             machine.SetFlag(BaseEntity.Flags.Reserved4, false);
